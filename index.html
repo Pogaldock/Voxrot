@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#030403">
+<title>VOXROT</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=VT323&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<canvas id="static" aria-hidden="true"></canvas>
+<div class="scan" aria-hidden="true"></div>
+<div class="vignette" aria-hidden="true"></div>
+
+<div id="app">
+  <header class="top">
+    <h1 class="logo" data-text="VOXROT" id="logo">VOXROT</h1>
+    <div class="chips">
+      <button class="chip" id="bpmChip" type="button">160 BPM</button>
+      <button class="chip" id="keyChip" type="button">F#m</button>
+    </div>
+  </header>
+  <canvas id="scope" class="scope" aria-label="Output signal" role="img"></canvas>
+
+  <!-- MAKE -->
+  <section class="panel" id="p-make">
+    <div class="block">
+      <div class="label"><span>VIBE</span><span class="dimtxt" id="vibeHint">pick one, reroll till it hits</span></div>
+      <div class="vibes" id="vibes"></div>
+    </div>
+
+    <div class="block">
+      <div class="label"><span>CHORDS <span class="dimtxt" id="numerals">i bVI bIII bVII</span></span><button class="mini" id="reroll" type="button">REROLL</button></div>
+      <div class="pads" id="pads"></div>
+      <div class="steps" id="steps" aria-hidden="true"></div>
+      <div class="hint">tap to hear · hold to swap</div>
+    </div>
+
+    <div class="block">
+      <div class="label">
+        <span>KEYS <span class="dimtxt" id="keysScale">F# MINOR</span></span>
+        <span class="keyctl">
+          <button class="mini" id="octDown" type="button" aria-label="Octave down">-</button>
+          <button class="mini" id="octUp" type="button" aria-label="Octave up">+</button>
+          <button class="mini" id="keysRec" type="button" aria-pressed="false">LOOP IT</button>
+          <button class="mini" id="keysClear" type="button">CLEAR</button>
+        </span>
+      </div>
+      <div class="keys" id="keys"></div>
+    </div>
+
+    <div class="block vox">
+      <div class="label"><span id="voxLabel">VOX · NO TAKES YET</span><span class="dimtxt" id="voxTime">HEADPHONES ON</span></div>
+      <canvas id="trace" class="trace" aria-label="Your pitch and the tuned pitch" role="img"></canvas>
+      <div class="fx" id="fx">
+        <button class="fxb" data-fx="tune" type="button">TUNE: HARD</button>
+        <button class="fxb" data-fx="oct" type="button">+12 OCT</button>
+        <button class="fxb" data-fx="chip" type="button">CHIPMUNK</button>
+        <button class="fxb" data-fx="wide" type="button">WIDE</button>
+        <button class="fxb" data-fx="crush" type="button">CRUSH</button>
+        <button class="fxb" data-fx="stutter" type="button">STUTTER</button>
+      </div>
+    </div>
+
+    <div class="transport">
+      <button class="round" id="play" type="button" aria-label="Play">
+        <svg class="i-play" viewBox="0 0 24 24" aria-hidden="true"><polygon points="7,4 20,12 7,20"/></svg>
+        <svg class="i-stop" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12"/></svg>
+      </button>
+      <button class="eye" id="rec" type="button" aria-label="Record vocal">
+        <svg viewBox="0 0 100 100" aria-hidden="true">
+          <circle class="eye-ring" cx="50" cy="50" r="46"/>
+          <g class="eye-shut">
+            <path d="M18 52 Q50 74 82 52" />
+            <path d="M28 60 l-5 9 M39 65 l-3 10 M50 67 l0 10 M61 65 l3 10 M72 60 l5 9"/>
+          </g>
+          <g class="eye-open">
+            <path d="M14 50 Q50 14 86 50 Q50 86 14 50 Z"/>
+            <circle class="iris" cx="50" cy="50" r="15"/>
+            <circle class="pupil" cx="50" cy="50" r="6"/>
+          </g>
+        </svg>
+      </button>
+      <button class="round" id="export" type="button" aria-label="Export song">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M6 9l6-6 6 6M4 21h16"/></svg>
+      </button>
+    </div>
+  </section>
+
+  <!-- VOX -->
+  <section class="panel" id="p-vox" hidden>
+    <div class="block">
+      <div class="label"><span>TAKES</span><span class="dimtxt">all on = stacked</span></div>
+      <div id="takes" class="takes"></div>
+    </div>
+    <div class="block">
+      <div class="label"><span>SYNC</span><span class="dimtxt">do this once per phone</span></div>
+      <p class="small">Headphones off, volume up, phone flat, quiet room. It plays 6 beeps and times how late your mic hears them, so takes land on the beat.</p>
+      <button class="mini solid wide-btn" id="calibrate" type="button">CALIBRATE SYNC</button>
+    </div>
+    <div class="block">
+      <div class="label"><span>SPACE</span></div>
+      <label class="fader"><span>REVERB</span><input type="range" id="m-rev" min="0" max="1" step="0.01"></label>
+      <label class="fader"><span>DELAY</span><input type="range" id="m-dly" min="0" max="1" step="0.01"></label>
+    </div>
+    <div class="block notes">
+      <p><b>Headphones on.</b> Without them the mic records the beat too, and the autotune chases the wrong notes.</p>
+      <p><b>Wired headphones, not Bluetooth.</b> Bluetooth adds a delay that changes and can't be measured from here.</p>
+      <p><b>Vocal still late or early?</b> Drag that take's SYNC until the words land on the beat.</p>
+      <p><b>Change the key</b> and every take re-snaps to the new scale.</p>
+    </div>
+  </section>
+
+  <!-- MIX -->
+  <section class="panel" id="p-mix" hidden>
+    <div class="block">
+      <div class="label"><span>LEVELS</span></div>
+      <label class="fader"><span>DRUMS</span><input type="range" id="m-drums" min="0" max="1.5" step="0.01"></label>
+      <label class="fader"><span>808 / BASS</span><input type="range" id="m-bass" min="0" max="1.5" step="0.01"></label>
+      <label class="fader"><span>CHORDS</span><input type="range" id="m-chords" min="0" max="1.5" step="0.01"></label>
+      <label class="fader"><span>KEYS</span><input type="range" id="m-keys" min="0" max="1.5" step="0.01"></label>
+      <label class="fader"><span>VOX</span><input type="range" id="m-vox" min="0" max="2" step="0.01"></label>
+    </div>
+    <div class="block">
+      <div class="label"><span>TEMPO + KEY</span><span class="dimtxt" id="bpmLock"></span></div>
+      <label class="fader"><span id="bpmVal">160 BPM</span><input type="range" id="bpm" min="70" max="210" step="1"></label>
+      <label class="fader"><span id="swingVal">SWING 0%</span><input type="range" id="swing" min="0" max="0.3" step="0.01"></label>
+      <div class="row">
+        <label class="sel"><span>KEY</span><select id="root"></select></label>
+        <label class="sel"><span>SCALE</span><select id="mode"><option value="minor">MINOR</option><option value="major">MAJOR</option></select></label>
+        <label class="sel"><span>KEYS SOUND</span><select id="lead"><option value="saw">SUPERSAW</option><option value="pluck">PLUCK</option><option value="square">CHIP</option></select></label>
+      </div>
+    </div>
+    <div class="block">
+      <div class="label"><span>MUTE</span></div>
+      <div class="fx" id="mutes">
+        <button class="fxb" data-mute="drums" type="button">DRUMS</button>
+        <button class="fxb" data-mute="bass" type="button">BASS</button>
+        <button class="fxb" data-mute="chords" type="button">CHORDS</button>
+        <button class="fxb" data-mute="keys" type="button">KEYS</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- SONGS -->
+  <section class="panel" id="p-songs" hidden>
+    <div class="block">
+      <div class="label"><span>THIS SONG</span></div>
+      <div class="row">
+        <input id="songName" class="text" type="text" maxlength="40" aria-label="Song name" placeholder="untitled rot">
+        <button class="mini solid" id="save" type="button">SAVE</button>
+      </div>
+      <div class="row">
+        <button class="mini solid" id="share" type="button">SHARE AUDIO</button>
+        <button class="mini" id="download" type="button">SAVE WAV</button>
+        <button class="mini danger" id="newSong" type="button">NEW SONG</button>
+      </div>
+      <div class="dimtxt small">Exports two loops of the full song with tails, as a WAV.</div>
+    </div>
+    <div class="block">
+      <div class="label"><span>SAVED ON THIS PHONE</span></div>
+      <div id="songs" class="songs"></div>
+    </div>
+  </section>
+
+  <nav class="tabs" id="tabs">
+    <button type="button" data-tab="make" class="on">MAKE</button>
+    <button type="button" data-tab="vox">VOX</button>
+    <button type="button" data-tab="mix">MIX</button>
+    <button type="button" data-tab="songs">SONGS</button>
+  </nav>
+</div>
+
+<div class="count" id="count" aria-live="polite" hidden></div>
+<div class="toast" id="toast" role="status" hidden></div>
+
+<script type="module" src="js/ui.js"></script>
+</body>
+</html>
