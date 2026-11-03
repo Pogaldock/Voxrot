@@ -102,6 +102,9 @@ export function buildGraph(ctx) {
   g.drumTone.frequency.value = 5000;
   g.drumDrive.connect(g.drumTone);
   g.drumTone.connect(g.bus.drums);
+  g.drumRev = ctx.createGain(); // clap reverb, opened only while drums are audible
+  g.drumRev.gain.value = 0.3;
+  g.drumRev.connect(g.revSend);
 
   // bass: duck (kick sidechain) -> drive -> low shelf -> tone -> bus
   g.bassIn = ctx.createGain();
@@ -134,7 +137,7 @@ export function buildGraph(ctx) {
   steps.connect(g.chordCrush);
   g.chordCrush.connect(g.bus.chords);
   g.chordRev = ctx.createGain();
-  chp.connect(g.chordRev);
+  g.bus.chords.connect(g.chordRev); // post-fader: muted/unsoloed parts send no reverb
   g.chordRev.connect(g.revSend);
 
   // melody: highpass -> bus, crush + reverb/delay sends
@@ -151,10 +154,10 @@ export function buildGraph(ctx) {
   msteps.connect(g.melCrush);
   g.melCrush.connect(g.bus.melody);
   g.melRev = ctx.createGain();
-  mhp.connect(g.melRev);
+  g.bus.melody.connect(g.melRev);
   g.melRev.connect(g.revSend);
   g.melDly = ctx.createGain();
-  mhp.connect(g.melDly);
+  g.bus.melody.connect(g.melDly);
   g.melDly.connect(g.dlySend);
 
   // vocal chain
@@ -192,8 +195,8 @@ export function buildGraph(ctx) {
   sat.connect(g.bus.vox);
   g.voxRev = ctx.createGain();
   g.voxDly = ctx.createGain();
-  sat.connect(g.voxRev);
-  sat.connect(g.voxDly);
+  g.bus.vox.connect(g.voxRev);
+  g.bus.vox.connect(g.voxDly);
   g.voxRev.connect(g.revSend);
   g.voxDly.connect(g.dlySend);
 
@@ -206,12 +209,20 @@ export function applyMix(g, song) {
   const P = song.parts;
   const t = g.ctx.currentTime;
   const set = (p, v) => p.setTargetAtTime(v, t, 0.02);
-  const mute = (part) => (P[part] && P[part].muted ? 0 : 1);
-  set(g.bus.drums.gain, m.drums * mute("drums"));
-  set(g.bus.bass.gain, m.bass * 0.9 * mute("bass"));
-  set(g.bus.chords.gain, m.chords * 0.75 * mute("chords"));
-  set(g.bus.melody.gain, m.melody * 0.9 * mute("melody"));
-  set(g.bus.vox.gain, m.vox * 1.2 * (song.voiceMuted ? 0 : 1));
+  // Solos stack: if anything is soloed, only soloed parts play. Mute always wins.
+  const anySolo = Object.values(P).some((p) => p.active !== false && p.solo) || !!song.voiceSolo;
+  const on = (part) => {
+    const p = P[part];
+    if (!p || p.active === false || p.muted) return 0;
+    return !anySolo || p.solo ? 1 : 0;
+  };
+  const voiceOn = song.voiceMuted ? 0 : !anySolo || song.voiceSolo ? 1 : 0;
+  set(g.bus.drums.gain, m.drums * on("drums"));
+  set(g.drumRev.gain, 0.3 * on("drums"));
+  set(g.bus.bass.gain, m.bass * 0.9 * on("bass"));
+  set(g.bus.chords.gain, m.chords * 0.75 * on("chords"));
+  set(g.bus.melody.gain, m.melody * 0.9 * on("melody"));
+  set(g.bus.vox.gain, m.vox * 1.2 * voiceOn);
   set(g.voxRev.gain, m.rev);
   set(g.voxDly.gain, m.dly);
   const eighth = 60 / song.bpm / 2;
@@ -336,10 +347,7 @@ function clap(g, t, vel, snd) {
   oa.connect(g.drumDrive);
   o.start(t);
   o.stop(t + 0.1);
-  const rs = ctx.createGain();
-  rs.gain.value = 0.3;
-  a.connect(rs);
-  rs.connect(g.revSend);
+  a.connect(g.drumRev);
   n.start(t, Math.random() * 0.5, 0.3);
 }
 
@@ -590,13 +598,14 @@ export function scheduleStep(g, song, chords, step, t0, stepDur) {
   const hard = D.genes[1];
   const t = t0 + (s % 2 ? D.genes[2] * 0.3 * stepDur : 0);
   const fill = bars >= 4 && bar % 4 === 3 && s >= 12;
-  if (dp.kick[s]) {
-    if (!D.muted) kick(g, t, lerp(0.75, 1.05, hard), ds);
+  const dOn = D.active !== false;
+  if (dOn && dp.kick[s]) {
+    kick(g, t, lerp(0.75, 1.05, hard), ds);
     duck(g.bassDuck.gain, t, 0.45, 0.12);
     if (v.chords.pump) duck(g.pump.gain, t, 0.2, stepDur * 3);
     hits.push({ part: "drums", row: "kick" });
   }
-  if (!D.muted) {
+  if (dOn) {
     if (dp.clap[s]) clap(g, t, lerp(0.7, 1, hard), ds);
     if (fill && s === 12 && D.genes[0] > 0.3) {
       for (let k = 0; k < 3; k++) clap(g, t + (k * stepDur * 4) / 3, 0.35 + k * 0.2, ds); // triplet roll into the loop
@@ -605,12 +614,12 @@ export function scheduleStep(g, song, chords, step, t0, stepDur) {
     for (let k = 0; k < hv; k++) hat(g, t + (k * stepDur) / hv, false, (k ? 0.7 : 1) * lerp(0.7, 1, hard), ds);
     if (dp.ohat[s]) hat(g, t, true, 1, ds);
   }
-  if (dp.clap[s]) hits.push({ part: "drums", row: "clap" });
-  if (dp.hat[s]) hits.push({ part: "drums", row: "hat" });
+  if (dOn && dp.clap[s]) hits.push({ part: "drums", row: "clap" });
+  if (dOn && dp.hat[s]) hits.push({ part: "drums", row: "hat" });
 
   // bass
   const B = P.bass;
-  if (B.pattern.rhythm[s]) {
+  if (B.active !== false && B.pattern.rhythm[s]) {
     let len = 1;
     while (s + len < 16 && !B.pattern.rhythm[s + len]) len++;
     const base = bassMidi(chord, v.bass.octave);
@@ -630,7 +639,7 @@ export function scheduleStep(g, song, chords, step, t0, stepDur) {
   const cs = C.sound;
   const cOpts = { vel: 0.8, bright: C.genes[1], detune: C.genes[2], attack: cs[1] * 0.3, release: lerp(0.03, 0.6, cs[2]), sub: v.chords.sub };
   const cr = C.pattern.rhythm;
-  if (cr[s]) {
+  if (C.active !== false && cr[s]) {
     const style = C.pattern.style;
     let len = 1;
     while (s + len < 16 && !cr[s + len]) len++;
@@ -649,7 +658,7 @@ export function scheduleStep(g, song, chords, step, t0, stepDur) {
   // melody
   const M = P.melody;
   const ms = M.sound;
-  const notes = M.notes || [];
+  const notes = M.active !== false ? M.notes || [] : [];
   for (let i = 0; i < notes.length; i++) {
     const n = notes[i];
     if (n.step !== step) continue;

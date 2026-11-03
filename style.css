@@ -332,3 +332,23 @@ input[type="range"]:disabled { opacity: 0.35; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+/* v3.1: build from scratch, solo/mute */
+.lanerow { display: grid; grid-template-columns: minmax(0, 1fr) 88px; gap: 6px; }
+.sm { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; }
+.smb { border-radius: 10px; background: var(--panel); border: 1px solid var(--line2); color: var(--dim); font-size: 13px; font-weight: 700; min-height: 58px; transition: background 0.12s, color 0.12s; }
+.smb.solo[aria-pressed="true"] { background: var(--melody); border-color: var(--melody); color: #000; }
+.smb.mute[aria-pressed="true"] { background: #2a1015; border-color: var(--voice); color: var(--voice); }
+.lane.dimmed { opacity: 0.35; }
+.addlane { height: 58px; border-radius: 12px; border: 1px dashed var(--line2); color: var(--dim); display: flex; align-items: center; justify-content: space-between; padding: 0 14px; font-size: 12px; letter-spacing: 2px; transition: transform 0.08s, border-color 0.2s; }
+.addlane:active { transform: scale(0.98); }
+.addlane .plus { font-size: 20px; margin-right: 10px; font-weight: 400; }
+.addlane .lbl { display: flex; align-items: center; }
+.addlane .nx { font-size: 9px; letter-spacing: 1px; color: var(--dim); }
+.addlane.next { border: 1.5px dashed var(--c); color: var(--c); font-weight: 700; box-shadow: 0 0 18px color-mix(in srgb, var(--c) 22%, transparent); animation: breathe 2.2s ease-in-out infinite; }
+@keyframes breathe { 50% { box-shadow: 0 0 28px color-mix(in srgb, var(--c) 35%, transparent); } }
+.sq.solo { font-size: 15px; font-weight: 700; color: var(--dim); }
+.sq.solo[aria-pressed="true"] { background: var(--melody); border-color: var(--melody); color: #000; }
+.big.danger { color: var(--voice); border-color: rgba(255, 46, 77, 0.4); margin-top: 6px; }
+.vibelist { display: flex; flex-direction: column; gap: 6px; }
+.vibelist .opt { text-align: left; padding: 10px 14px; }

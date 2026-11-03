@@ -27,14 +27,11 @@
       <button type="button" id="st-tempo"><span class="k">TEMPO</span><span class="v" id="v-tempo">140</span></button>
       <button type="button" id="st-key"><span class="k">KEY</span><span class="v" id="v-key">C#m</span></button>
       <button type="button" id="st-loop"><span class="k">LOOP</span><span class="v" id="v-loop">8 BARS</span></button>
-      <button type="button" id="st-taste"><span class="k">TASTE</span><span class="v cyan" id="v-taste">0</span></button>
+      <button type="button" id="st-vibe"><span class="k">VIBE</span><span class="v cyan" id="v-vibe">RAGE</span></button>
     </div>
 
     <div class="scroll">
-      <div class="label"><span>VIBE</span><span class="hint">tap to restyle everything unlocked</span></div>
-      <div class="pills" id="vibes"></div>
-
-      <div class="label"><span id="tracksLabel">TRACKS · 8 BARS</span><span class="hint">tap: open · hold: mute</span></div>
+      <div class="label"><span id="tracksLabel">TRACKS · 8 BARS</span><span class="hint">S solo · M mute · solos stack</span></div>
       <div class="tracks">
         <div class="chordrow" id="chordRow"></div>
         <div id="lanes" class="lanes"></div>
@@ -66,6 +63,7 @@
     <header class="bar">
       <button type="button" class="sq" id="partBack" aria-label="Back to tracks"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg></button>
       <div class="ptitle"><span id="partName">DRUMS</span><span class="sub" id="partSub">RAGE KIT</span></div>
+      <button type="button" class="sq solo" id="partSolo" aria-label="Solo this part" aria-pressed="false">S</button>
       <button type="button" class="sq" id="partLock" aria-label="Lock part" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path class="shackle" d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></button>
     </header>
     <div class="seg" id="partTabs">
@@ -84,6 +82,7 @@
         <button type="button" class="big" id="randomVibe">RANDOM IN VIBE</button>
         <button type="button" class="big cyanfill" id="moreLike">MORE LIKE THIS</button>
       </div>
+      <button type="button" class="big danger" id="partRemove">REMOVE FROM TRACK</button>
     </div>
     <div class="scroll" id="pv-sound" hidden>
       <div class="genes" id="genes"></div>

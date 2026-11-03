@@ -56,6 +56,51 @@ function newSong(vibeId, bars = 8) {
   return s;
 }
 const vibe = () => vibeById(song.vibe);
+const BUILD_ORDER = ["drums", "bass", "chords", "melody", "voice"];
+const sparse = (v, p) => Math.min(0.35, (v.genes?.[p]?.[0] ?? 0.5) * 0.45);
+const isActive = (p) => (p === "voice" ? song.takes.length > 0 : song.parts[p].active !== false);
+const nextToAdd = () => BUILD_ORDER.find((p) => !isActive(p));
+
+async function addPart(p) {
+  if (p === "voice") {
+    recMode = "voice";
+    renderTracks();
+    return doRecord();
+  }
+  commit();
+  const v = vibe();
+  const part = song.parts[p];
+  part.active = true;
+  part.muted = false;
+  part.genes = [...(v.genes?.[p] || part.genes)];
+  part.genes[0] = sparse(v, p); // start sparse, build it up with BUSY
+  part.seed = newSeed();
+  build(p, song, v);
+  if (p === "drums" && !song.parts.bass.edited) build("bass", song, v);
+  delete varCache[p];
+  buzz([8, 30, 8]);
+  toast(`${LABELS[p]} in · tap it to shape it`);
+  changed();
+  if (!engine.playing) { await engine.start(); renderTransport(); }
+}
+function removePart(p) {
+  commit();
+  const part = song.parts[p];
+  part.active = false;
+  part.solo = false;
+  part.locked = false;
+  delete varCache[p];
+  toast(`${LABELS[p]} removed`);
+  showScreen("s-tracks");
+  changed();
+}
+function toggleSolo(p) {
+  commit();
+  if (p === "voice") song.voiceSolo = !song.voiceSolo;
+  else song.parts[p].solo = !song.parts[p].solo;
+  buzz(12);
+  changed();
+}
 
 function setVibe(id) {
   commit();
@@ -73,7 +118,10 @@ function setVibe(id) {
   for (const p of PARTS) {
     const part = song.parts[p];
     if (part.locked) continue;
+    const busy = part.genes[0];
     part.genes = [...(v.genes?.[p] || part.genes)];
+    if (part.active) part.genes[0] = busy; // keep how built-up it is
+    else part.genes[0] = sparse(v, p);
     part.seed = newSeed();
     build(p, song, v);
   }
@@ -257,6 +305,7 @@ function finishMelody(cancel) {
   commit();
   const m = song.parts.melody;
   m.notes = r.notes.sort((a, b) => a.step - b.step);
+  m.active = true;
   m.edited = true;
   m.locked = true;
   toast(`Melody recorded · ${m.notes.length} notes · locked`);
@@ -274,21 +323,10 @@ function renderTracks() {
   $("v-tempo").textContent = song.bpm;
   $("v-key").textContent = keyLabel(song.root, song.mode);
   $("v-loop").textContent = `${song.bars} BARS`;
-  $("v-taste").textContent = taste.count;
+  $("v-vibe").textContent = vibe().name.split(" ")[0];
   $("songTitle").textContent = (song.name || "UNTITLED ROT").toUpperCase();
-  $("tracksLabel").textContent = song.gen ? `TRACKS · GEN ${song.gen}` : "TRACKS";
   $("keysLabel").textContent = `KEYS · ${NOTE_NAMES[song.root]} ${song.mode.toUpperCase()}`;
   $("octVal").textContent = `OCT ${melOct > 0 ? "+" : ""}${melOct}`;
-
-  $("vibes").replaceChildren(...VIBES.map((vb) => {
-    const b = document.createElement("button");
-    b.type = "button";
-    b.className = "pill" + (vb.id === song.vibe ? " on" : "");
-    b.textContent = vb.name;
-    b.setAttribute("aria-pressed", vb.id === song.vibe);
-    b.onclick = () => { if (vb.id !== song.vibe || true) { setVibe(vb.id); buzz(10); } };
-    return b;
-  }));
 
   // chord row
   const row = $("chordRow");
@@ -303,28 +341,46 @@ function renderTracks() {
     cells.appendChild(b);
   });
 
-  // lanes (built once)
+  // lanes: active parts get a lane + S/M, empty ones a dashed + ADD
   const lanes = $("lanes");
-  if (!lanes.children.length) {
-    for (const p of LANES) {
+  const nx = nextToAdd();
+  const anySolo = PARTS.some((p) => song.parts[p].active && song.parts[p].solo) || song.voiceSolo;
+  const n = BUILD_ORDER.filter(isActive).length;
+  $("tracksLabel").textContent = `TRACKS · ${n} OF 5${song.gen ? " · GEN " + song.gen : ""}`;
+  lanes.replaceChildren(...BUILD_ORDER.map((p) => {
+    if (!isActive(p)) {
       const b = document.createElement("button");
       b.type = "button";
-      b.className = "lane";
-      b.dataset.part = p;
+      b.className = "addlane" + (p === nx ? " next" : "");
       b.style.setProperty("--c", COLORS[p]);
-      b.innerHTML = `<span class="meta"><span class="lname">${LABELS[p]}</span><span class="lsub"></span></span><span class="cv"><canvas></canvas></span><span class="flash"></span>`;
-      bindHold(b, () => (p === "voice" ? openVoice() : openPart(p)), () => toggleMute(p));
-      lanes.appendChild(b);
+      b.innerHTML = p === "voice"
+        ? `<span class="lbl"><span class="plus" style="color:${COLORS.voice}">●</span>RECORD VOICE</span>`
+        : `<span class="lbl"><span class="plus">+</span>ADD ${LABELS[p]}</span>`;
+      if (p === nx) b.insertAdjacentHTML("beforeend", `<span class="nx">NEXT</span>`);
+      b.onclick = () => addPart(p);
+      return b;
     }
-  }
-  for (const b of lanes.children) {
-    const p = b.dataset.part;
+    const row = document.createElement("div");
+    row.className = "lanerow";
     const muted = p === "voice" ? song.voiceMuted : song.parts[p].muted;
-    b.classList.toggle("muted", muted);
-    b.classList.toggle("locked", p !== "voice" && song.parts[p].locked);
-    b.querySelector(".lsub").textContent = laneSub(p);
-    b.setAttribute("aria-label", `${LABELS[p]}${muted ? ", muted" : ""}. Tap to open, hold to mute.`);
-  }
+    const solo = p === "voice" ? song.voiceSolo : song.parts[p].solo;
+    const lane = document.createElement("button");
+    lane.type = "button";
+    lane.className = "lane" + (p !== "voice" && song.parts[p].locked ? " locked" : "") + ((muted || (anySolo && !solo)) ? " dimmed" : "");
+    lane.dataset.part = p;
+    lane.style.setProperty("--c", COLORS[p]);
+    lane.innerHTML = `<span class="meta"><span class="lname">${LABELS[p]}</span><span class="lsub"></span></span><span class="cv"><canvas></canvas></span><span class="flash"></span>`;
+    lane.querySelector(".lsub").textContent = laneSub(p);
+    lane.setAttribute("aria-label", `${LABELS[p]}. Tap to open.`);
+    lane.onclick = () => (p === "voice" ? openVoice() : openPart(p));
+    const sm = document.createElement("div");
+    sm.className = "sm";
+    sm.innerHTML = `<button type="button" class="smb solo" aria-pressed="${!!solo}" aria-label="Solo ${LABELS[p]}">S</button><button type="button" class="smb mute" aria-pressed="${!!muted}" aria-label="Mute ${LABELS[p]}">M</button>`;
+    sm.children[0].onclick = () => toggleSolo(p);
+    sm.children[1].onclick = () => toggleMute(p);
+    row.append(lane, sm);
+    return row;
+  }));
   laneDirty = true;
   $("keysDock").hidden = recMode !== "melody";
   if (recMode === "melody") renderKeys();
@@ -350,8 +406,7 @@ function toggleMute(p) {
   commit();
   if (p === "voice") song.voiceMuted = !song.voiceMuted;
   else song.parts[p].muted = !song.parts[p].muted;
-  buzz(20);
-  toast(`${LABELS[p]} ${(p === "voice" ? song.voiceMuted : song.parts[p].muted) ? "muted" : "on"}`);
+  buzz(12);
   changed();
 }
 
@@ -445,6 +500,7 @@ function renderPart() {
   $("partName").textContent = LABELS[p];
   $("partSub").textContent = `${vibe().name} · GEN ${song.gen}${part.edited ? " · HAND EDITED" : ""}`;
   $("partLock").setAttribute("aria-pressed", part.locked);
+  $("partSolo").setAttribute("aria-pressed", !!part.solo);
   $("partLock").setAttribute("aria-label", part.locked ? "Unlock part" : "Lock part");
   renderEditor();
   renderDials();
@@ -458,6 +514,20 @@ function showPartTab(t) {
 }
 for (const b of $("partTabs").children) b.onclick = () => showPartTab(b.dataset.tab);
 $("partBack").onclick = () => showScreen("s-tracks");
+$("partSolo").onclick = () => toggleSolo(curPart);
+let removeArmed = false;
+$("partRemove").onclick = () => {
+  const b = $("partRemove");
+  if (!removeArmed) {
+    removeArmed = true;
+    b.textContent = "TAP AGAIN TO REMOVE";
+    setTimeout(() => { removeArmed = false; b.textContent = "REMOVE FROM TRACK"; }, 2500);
+    return;
+  }
+  removeArmed = false;
+  b.textContent = "REMOVE FROM TRACK";
+  removePart(curPart);
+};
 $("partLock").onclick = () => {
   const part = song.parts[curPart];
   part.locked = !part.locked;
@@ -788,7 +858,6 @@ function killVar(p, idx, el) {
     const card = varCard(p, varCache[p][idx], idx);
     card.classList.add("born");
     el.replaceWith(card);
-    $("v-taste").textContent = taste.count;
   }, 180);
 }
 function drawMini(cv, p, g) {
@@ -1111,7 +1180,12 @@ $("st-loop").onclick = () => openSheet("LOOP LENGTH", (body) => {
   }, `${Math.round((n * 4 * 60) / song.bpm)} s`));
   body.append(g, el("p", "hint block", locked ? "Locked: your vocal takes are this long. Delete them to change length." : "Longer loops repeat the progression and write a longer melody."));
 });
-$("st-taste").onclick = () => openSheet("YOUR TASTE", (body) => {
+$("st-vibe").onclick = () => openSheet("VIBE", (body) => {
+  const list = el("div", "vibelist");
+  for (const vb of VIBES) list.appendChild(optBtn(vb.name, vb.id === song.vibe, () => { setVibe(vb.id); buzz(10); closeSheet(); }, `${vb.bpm} BPM · ${keyLabel(vb.root, vb.mode)}`));
+  body.append(list, el("p", "hint block", "Restyles the parts you've added, keeps how built-up they are. Locked parts stay as they are."));
+});
+const openTasteSheet = () => openSheet("YOUR TASTE", (body) => {
   body.appendChild(el("p", "hint block", `Learned from <b style="color:var(--cyan)">${taste.count}</b> keeps and kills. Variations are ranked by it; one WILD card per batch ignores it so you don't get stuck in a rut.`));
   for (const p of PARTS) {
     const m = taste[p];
@@ -1179,7 +1253,7 @@ $("menuBtn").onclick = () => openSheet("SONG", async (body) => {
     closeSheet();
     toast("Fresh song");
   });
-  body.append(name, r1, fresh);
+  body.append(name, r1, fresh, optBtn(`YOUR TASTE · ${taste.count} CHOICES`, false, () => openTasteSheet()));
   body.appendChild(el("div", "label", "<span>LEVELS</span>"));
   for (const [k, lab] of [["drums", "DRUMS"], ["bass", "808"], ["chords", "CHORDS"], ["melody", "MELODY"], ["vox", "VOICE"]]) {
     const f = el("label", "fader", `<span>${lab}</span>`);
@@ -1229,7 +1303,7 @@ $("mutate").onclick = () => {
   song.gen++;
   let n = 0;
   for (const p of PARTS) {
-    if (song.parts[p].locked) continue;
+    if (song.parts[p].locked || !song.parts[p].active) continue;
     const best = variations(p, song, vibe(), taste, { drift, pool: 20, show: 1 })[0];
     applyGenome(p, best.part);
     n++;
@@ -1238,7 +1312,7 @@ $("mutate").onclick = () => {
   }
   for (const k in varCache) delete varCache[k];
   buzz([10, 20, 10, 20, 10]);
-  toast(n ? `Generation ${song.gen} · ${n} part${n > 1 ? "s" : ""} evolved` : "Everything's locked");
+  toast(n ? `Generation ${song.gen} · ${n} part${n > 1 ? "s" : ""} evolved` : "Nothing to evolve: add a part or unlock one");
   changed();
 };
 for (const b of $("recMode").children) {
@@ -1407,7 +1481,7 @@ function drawLaneStatic(p, w, h) {
   return off;
 }
 function drawLanes() {
-  const lanes = $("lanes").children;
+  const lanes = $("lanes").querySelectorAll(".lane");
   const pos = engine.position();
   const steps = 16 * song.bars;
   for (const lane of lanes) {
@@ -1559,6 +1633,10 @@ async function loadSong(id) {
   if (!rec || rec.v !== 3) return false;
   const { id: _id, updated, ...rest } = rec;
   song = { ...newSong(rec.vibe, rec.bars), ...rest, mix: { ...DEFAULT_MIX, ...rec.mix } };
+  for (const p of PARTS) {
+    if (song.parts[p].active === undefined) song.parts[p].active = true; // songs saved before v3.1
+    song.parts[p].solo ||= false;
+  }
   song.takes = (rec.takes || []).map((t) => {
     const tk = { ...t, raw: t.raw instanceof Float32Array ? t.raw : new Float32Array(t.raw) };
     takeStore.set(tk.id, tk);

@@ -219,6 +219,8 @@ export function freshPart(part, vibe) {
     soundLock: SOUND_GENES[part].map(() => false),
     locked: false,
     muted: false,
+    solo: false,
+    active: false,
     edited: false,
     pattern: null,
     notes: []
