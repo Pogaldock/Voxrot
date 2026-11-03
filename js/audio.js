@@ -719,7 +719,7 @@ export class Engine {
   }
 
   tick() {
-    const ahead = 0.15;
+    const ahead = 0.3; // seconds scheduled in advance: slack for busy phones
     while (this.playing && this.nextTime < this.ctx.currentTime + ahead) {
       const st = this.step;
       const t = this.nextTime;

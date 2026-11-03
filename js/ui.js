@@ -97,9 +97,33 @@ function guessLatency() {
   return Math.max(0.06, g + 0.02);
 }
 
+// heavy DSP runs in a worker; falls back to the main thread if workers fail
+let worker = null;
+const pending = new Map();
+try {
+  worker = new Worker(new URL("./dsp-worker.js", import.meta.url), { type: "module" });
+  worker.onmessage = (e) => {
+    const p = pending.get(e.data.id);
+    if (p) { pending.delete(e.data.id); p(e.data); }
+  };
+  worker.onerror = () => { worker = null; };
+} catch (e) { worker = null; }
+let jobId = 0;
+function runDsp(tk, opts) {
+  if (!worker) {
+    const out = processTake(tk, opts);
+    return Promise.resolve({ L: out[0], R: out[1], track: tk.track });
+  }
+  return new Promise((res) => {
+    const id = ++jobId;
+    pending.set(id, res);
+    worker.postMessage({ id, raw: tk.raw, sr: tk.sr, track: tk.track, opts });
+  });
+}
+
 async function processOne(tk) {
   const sr = tk.sr;
-  const out = processTake(tk, {
+  const res = await runDsp(tk, {
     scalePcs: scalePitchClasses(song.root, song.mode),
     tune: song.fx.tune,
     oct: song.fx.oct,
@@ -112,7 +136,8 @@ async function processOne(tk) {
     steps: LOOP_STEPS,
     seed: tk.seed
   });
-  tk.buffer = makeBuffer(out, sr);
+  tk.track = res.track;
+  tk.buffer = makeBuffer([res.L, res.R], sr);
 }
 
 let reprocessToken = 0;
@@ -421,7 +446,12 @@ $("keysRec").onclick = async () => {
   if (keysRecArmed && !engine.playing) { await engine.start(); renderTransport(); }
   render();
 };
-$("keysClear").onclick = () => { song.keysLoop = []; changed(); };
+$("keysClear").onclick = () => {
+  song.keysLoop = [];
+  keysRecArmed = false;
+  changed();
+  toast("Melody cleared");
+};
 
 for (const b of document.querySelectorAll("[data-fx]")) {
   b.onclick = () => {
@@ -536,11 +566,13 @@ engine.on("count", (n) => {
   }
 });
 let micLevel = 0;
+let levelTick = 0;
 const pitchBuf = new Float32Array(8192);
 engine.on("level", (lvl, data) => {
   micLevel = lvl;
   document.documentElement.style.setProperty("--lvl", Math.min(1, lvl * 6).toFixed(3));
   if (!recording || !engine.playing) return;
+  if ((levelTick = (levelTick + 1) % 2)) return; // live pitch every other chunk is plenty
   pitchBuf.copyWithin(0, data.length);
   pitchBuf.set(data, pitchBuf.length - data.length);
   const tr = detectPitch(pitchBuf, engine.ctx.sampleRate);
@@ -638,10 +670,8 @@ function drawScope(level) {
   const phos = getVar("--phos");
   draw(getVar("--blood"), -2 - level * 6, 0.5, 1.5);
   draw(getVar("--ice"), 2 + level * 6, 0.5, 1.5);
-  scx.shadowColor = phos;
-  scx.shadowBlur = 8 * dpr;
+  draw(phos, 0, 0.25, 6); // cheap glow: wide faint stroke under the line (shadowBlur is slow on Android)
   draw(phos, 0, 1, 2);
-  scx.shadowBlur = 0;
   scx.globalAlpha = 1;
 }
 
@@ -696,8 +726,6 @@ function drawTrace() {
     if (song.fx.tune !== "off") {
       tcx.strokeStyle = phos;
       tcx.lineWidth = 2.5 * dpr;
-      tcx.shadowColor = phos;
-      tcx.shadowBlur = 6 * dpr;
       tcx.beginPath();
       let prev = null;
       for (const p of pts) {
@@ -710,7 +738,6 @@ function drawTrace() {
         prev = { x, s };
       }
       tcx.stroke();
-      tcx.shadowBlur = 0;
     }
   } else {
     tcx.fillStyle = getVar("--dim");

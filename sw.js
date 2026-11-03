@@ -1,6 +1,6 @@
 // Offline cache. Network first, so a new push shows up on the next open; cache when offline.
-const CACHE = "voxrot-v1";
-const SHELL = ["./", "index.html", "style.css", "manifest.json", "js/ui.js", "js/audio.js", "js/dsp.js", "js/vibes.js", "js/capture-worklet.js", "icons/icon-192.png"];
+const CACHE = "voxrot-v2";
+const SHELL = ["./", "index.html", "style.css", "manifest.json", "js/ui.js", "js/audio.js", "js/dsp.js", "js/vibes.js", "js/capture-worklet.js", "js/dsp-worker.js", "icons/icon-192.png"];
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
 });
