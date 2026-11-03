@@ -1,103 +1,135 @@
-// VOXROT interface
+// VOXROT v3 interface
+// Screens: TRACKS (overview), PART (drums/bass/chords/melody), VOICE, plus a bottom SHEET.
 import { VIBES, SWAP_OPTIONS, NOTE_NAMES, vibeById, parseNumeral, scalePitchClasses, keyLabel } from "./vibes.js";
-import { Engine, REC_MARGIN, LOOP_STEPS, makeBuffer, renderWav } from "./audio.js";
-import { processTake, detectPitch, snapToScale } from "./dsp.js";
+import { Engine, REC_MARGIN, makeBuffer, renderWav } from "./audio.js";
+import { processTake, detectPitch } from "./dsp.js";
+import { PARTS, GENE_NAMES, SOUND_GENES, build, freshPart, variations, learn, newTaste, newSeed, chordDegrees } from "./gen.js";
 
 const $ = (id) => document.getElementById(id);
 const engine = new Engine();
-const DEFAULT_MIX = { drums: 0.9, bass: 0.95, chords: 0.7, keys: 0.75, vox: 1, rev: 0.28, dly: 0.16 };
-const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+const COLORS = { drums: "#39ff14", bass: "#00e5ff", chords: "#a57bff", melody: "#ffb020", voice: "#ff2e4d" };
+const LABELS = { drums: "DRUMS", bass: "808", chords: "CHORDS", melody: "MELODY", voice: "VOICE" };
+const LANES = ["drums", "bass", "chords", "melody", "voice"];
+const DEFAULT_MIX = { drums: 0.9, bass: 0.95, chords: 0.7, melody: 0.75, vox: 1, rev: 0.28, dly: 0.16 };
 const pick = (a) => a[Math.floor(Math.random() * a.length)];
+const clamp01 = (x) => Math.max(0, Math.min(1, x));
 const buzz = (ms) => { try { navigator.vibrate && navigator.vibrate(ms); } catch (e) { /* no haptics */ } };
+const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-let song = newSong("crush");
+let song;
+let taste = loadTaste();
+let recMode = "voice";
 let recording = false;
-let keysRecArmed = false;
-let processing = 0;
-let lastTakeId = null;
-let livePitch = [];
+let melOct = 0;
+let curPart = null;
+let curBar = 0;
+let drift = 0.4;
+const varCache = {};
+const history = [];
+const takeStore = new Map(); // take id -> take (buffers survive undo)
 
 // ---------- song ----------
-function newSong(vibeId) {
+function extendChords(prog, bars) {
+  return Array.from({ length: bars }, (_, i) => prog[i % prog.length]);
+}
+function newSong(vibeId, bars = 8) {
   const v = vibeById(vibeId);
-  return {
-    id: "current",
+  const s = {
+    v: 3,
     name: "",
     vibe: v.id,
     bpm: v.bpm,
-    swing: v.swing,
     root: v.root,
     mode: v.mode,
-    prog: pick(v.progressions).split(" "),
-    keyOct: 4,
+    bars,
     lead: v.lead,
-    keysLoop: [],
-    mix: { ...DEFAULT_MIX },
+    gen: 0,
+    chords: extendChords(pick(v.progressions).split(" "), bars),
+    parts: {},
     fx: { ...v.fx },
-    mute: {},
+    mix: { ...DEFAULT_MIX },
+    voiceMuted: false,
     takes: []
   };
+  for (const p of PARTS) s.parts[p] = freshPart(p, v);
+  for (const p of PARTS) build(p, s, v);
+  return s;
 }
+const vibe = () => vibeById(song.vibe);
 
 function setVibe(id) {
+  commit();
   const v = vibeById(id);
   const hasTakes = song.takes.length > 0;
   song.vibe = v.id;
-  song.prog = pick(v.progressions).split(" ");
   song.lead = v.lead;
   song.fx = { ...v.fx };
-  song.swing = v.swing;
   if (!hasTakes) {
     song.bpm = v.bpm;
     song.root = v.root;
     song.mode = v.mode;
-  } else {
-    toast(`Kept ${song.bpm} BPM and ${keyLabel(song.root, song.mode)} so your vocals stay in time`);
   }
+  if (!song.parts.chords.locked) song.chords = extendChords(pick(v.progressions).split(" "), song.bars);
+  for (const p of PARTS) {
+    const part = song.parts[p];
+    if (part.locked) continue;
+    part.genes = [...(v.genes?.[p] || part.genes)];
+    part.seed = newSeed();
+    build(p, song, v);
+  }
+  for (const k in varCache) delete varCache[k];
+  if (hasTakes) toast(`Kept ${song.bpm} BPM, ${keyLabel(song.root, song.mode)} so your vocals stay in time`);
   changed({ reprocess: true });
 }
 
-function reroll() {
-  const v = vibeById(song.vibe);
-  const options = v.progressions.filter((p) => p !== song.prog.join(" "));
-  const prog = pick(options.length ? options : v.progressions).split(" ");
-  if (Math.random() < 0.35) {
-    const i = Math.floor(Math.random() * prog.length);
-    prog[i] = pick(SWAP_OPTIONS[song.mode]);
-  }
-  song.prog = prog;
-  changed();
-  glitch(true);
+// ---------- undo ----------
+function snapshot() {
+  const { takes, ...rest } = song;
+  return JSON.stringify({ ...rest, takeIds: takes.map((t) => ({ id: t.id, on: t.on, nudge: t.nudge })) });
+}
+function commit() {
+  history.push(snapshot());
+  if (history.length > 60) history.shift();
+  $("undo").disabled = false;
+}
+function undo() {
+  const snap = history.pop();
+  if (!snap) return;
+  const s = JSON.parse(snap);
+  const ids = s.takeIds || [];
+  delete s.takeIds;
+  s.takes = ids.map((t) => {
+    const tk = takeStore.get(t.id);
+    if (tk) { tk.on = t.on; tk.nudge = t.nudge; }
+    return tk;
+  }).filter(Boolean);
+  song = s;
+  for (const k in varCache) delete varCache[k];
+  $("undo").disabled = !history.length;
+  changed({ reprocess: true, commitSave: true });
+  toast("Undone");
 }
 
-function swapChord(i) {
-  const opts = SWAP_OPTIONS[song.mode].filter((n) => n !== song.prog[i]);
-  song.prog[i] = pick(opts);
-  buzz(20);
-  changed();
-  engine.auditionChord(i);
-}
-
-// everything that changes the song funnels through here
+// ---------- change funnel ----------
 let saveTimer = null;
-function changed({ reprocess = false, structure = true } = {}) {
+function changed({ reprocess = false } = {}) {
   engine.setSong(song);
-  if (structure) render();
+  renderTracks();
+  if (curPart && !$("s-part").hidden) renderPart();
+  if (!$("s-voice").hidden) renderVoice();
   if (reprocess) reprocessAll();
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => saveSong("current"), 700);
 }
-
-// ---------- takes ----------
-function guessLatency() {
-  const stored = Number(lsGet("voxrot.lat"));
-  if (stored > 0) return stored;
-  const c = engine.ctx;
-  const g = (c && (c.outputLatency || 0) + (c.baseLatency || 0)) || 0;
-  return Math.max(0.06, g + 0.02);
+function light() {
+  // cheap update during dial drags: audio + visuals only
+  engine.setSong(song);
+  laneDirty = true;
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => saveSong("current"), 900);
 }
 
-// heavy DSP runs in a worker; falls back to the main thread if workers fail
+// ---------- takes / DSP worker ----------
 let worker = null;
 const pending = new Map();
 try {
@@ -120,79 +152,84 @@ function runDsp(tk, opts) {
     worker.postMessage({ id, raw: tk.raw, sr: tk.sr, track: tk.track, opts });
   });
 }
-
+function guessLatency() {
+  const stored = Number(lsGet("voxrot.lat"));
+  if (stored > 0) return stored;
+  const c = engine.ctx;
+  const g = (c && (c.outputLatency || 0) + (c.baseLatency || 0)) || 0;
+  return Math.max(0.06, g + 0.02);
+}
 async function processOne(tk) {
   const sr = tk.sr;
+  const stepLen = (60 / song.bpm / 4) * sr;
   const res = await runDsp(tk, {
     scalePcs: scalePitchClasses(song.root, song.mode),
-    tune: song.fx.tune,
-    oct: song.fx.oct,
-    chip: song.fx.chip,
-    wide: song.fx.wide,
-    crush: song.fx.crush,
-    stutter: song.fx.stutter,
+    ...song.fx,
     gridStart: Math.round((REC_MARGIN + tk.lat + tk.nudge / 1000) * sr),
-    stepLen: (60 / song.bpm / 4) * sr,
-    steps: LOOP_STEPS,
+    stepLen,
+    steps: 16 * song.bars,
     seed: tk.seed
   });
   tk.track = res.track;
   tk.buffer = makeBuffer([res.L, res.R], sr);
+  // peaks for drawing, over the loop window
+  const start = Math.round((REC_MARGIN + tk.lat + tk.nudge / 1000) * sr);
+  const len = Math.round(stepLen * 16 * song.bars);
+  const N = 256;
+  tk.peaks = new Float32Array(N);
+  for (let i = 0; i < N; i++) {
+    let m = 0;
+    const a = start + Math.floor((i * len) / N);
+    const b = start + Math.floor(((i + 1) * len) / N);
+    for (let j = a; j < b; j += 8) m = Math.max(m, Math.abs(res.L[j] || 0));
+    tk.peaks[i] = m;
+  }
 }
-
 let reprocessToken = 0;
+let processing = 0;
 async function reprocessAll() {
   if (!song.takes.length) return;
   const token = ++reprocessToken;
   processing++;
-  renderVoxLabel();
+  renderVoiceSub();
   for (const tk of song.takes) {
-    await new Promise((r) => setTimeout(r, 0));
     if (token !== reprocessToken) break;
     await processOne(tk);
   }
   processing--;
-  renderVoxLabel();
-  renderTakes();
+  laneDirty = true;
+  renderVoiceSub();
+  if (!$("s-voice").hidden) renderTakes();
 }
 
+// ---------- recording ----------
+let melRec = null;
 async function doRecord() {
   if (recording) {
-    engine.cancelRecord();
+    if (recMode === "voice") engine.cancelRecord();
+    else finishMelody(true);
     return;
   }
+  if (recMode === "melody") return startMelody();
   try {
     recording = true;
-    livePitch = [];
     renderTransport();
     const lat = guessLatency();
     const res = await engine.record(lat);
     recording = false;
     renderTransport();
-    if (!res) {
-      toast("Take cancelled");
-      return;
-    }
-    const tk = {
-      id: "t" + Date.now().toString(36),
-      raw: res.raw,
-      sr: res.sr,
-      lat,
-      nudge: 0,
-      on: true,
-      seed: Math.floor(Math.random() * 1e9)
-    };
+    if (!res) { toast("Take cancelled"); return; }
+    commit();
+    const tk = { id: "t" + Date.now().toString(36), raw: res.raw, sr: res.sr, lat, nudge: 0, on: true, seed: Math.floor(Math.random() * 1e9) };
+    takeStore.set(tk.id, tk);
     processing++;
-    renderVoxLabel();
-    await new Promise((r) => setTimeout(r, 0));
+    renderVoiceSub();
     await processOne(tk);
     processing--;
     song.takes.push(tk);
-    lastTakeId = tk.id;
     toast(`TAKE ${String(song.takes.length).padStart(2, "0")} IN`);
     buzz([30, 40, 30]);
-    changed({ structure: false });
-    render();
+    changed();
   } catch (e) {
     recording = false;
     renderTransport();
@@ -200,72 +237,691 @@ async function doRecord() {
   }
 }
 
-// ---------- rendering ----------
-function render() {
-  const v = vibeById(song.vibe);
-  $("bpmChip").textContent = `${song.bpm} BPM`;
-  $("keyChip").textContent = keyLabel(song.root, song.mode);
-
-  // vibes
-  const vibes = $("vibes");
-  vibes.replaceChildren(
-    ...VIBES.map((vb) => {
-      const b = document.createElement("button");
-      b.type = "button";
-      b.className = "vibe" + (vb.id === song.vibe ? " on" : "");
-      b.textContent = vb.name;
-      b.setAttribute("aria-pressed", vb.id === song.vibe);
-      b.onclick = () => { setVibe(vb.id); buzz(10); };
-      return b;
-    })
-  );
-
-  // chords
-  const chords = song.prog.map((n) => parseNumeral(n, song.root));
-  $("numerals").textContent = song.prog.join(" ");
-  const pads = $("pads");
-  pads.replaceChildren(
-    ...chords.map((c, i) => {
-      const b = document.createElement("button");
-      b.type = "button";
-      b.className = "pad";
-      b.dataset.i = i;
-      b.innerHTML = `<span class="pname"></span><span class="pnum"></span>`;
-      b.querySelector(".pname").textContent = c.name;
-      b.querySelector(".pnum").textContent = c.numeral;
-      bindHold(b, () => engine.auditionChord(i), () => swapChord(i));
-      return b;
-    })
-  );
-
-  // steps row
-  if (!$("steps").children.length) {
-    for (let i = 0; i < 16; i++) $("steps").appendChild(document.createElement("i"));
+async function startMelody() {
+  recording = true;
+  renderTransport();
+  const loopStart = await engine.start(true);
+  melRec = { loopStart, notes: [], down: new Map() };
+  engine.at(loopStart + engine.loopDur, () => finishMelody(false));
+}
+function finishMelody(cancel) {
+  if (!melRec) return;
+  const r = melRec;
+  melRec = null;
+  recording = false;
+  renderTransport();
+  if (cancel || !r.notes.length) {
+    toast(cancel ? "Melody take cancelled" : "No notes played, melody unchanged");
+    return;
   }
+  commit();
+  const m = song.parts.melody;
+  m.notes = r.notes.sort((a, b) => a.step - b.step);
+  m.edited = true;
+  m.locked = true;
+  toast(`Melody recorded · ${m.notes.length} notes · locked`);
+  changed();
+}
+function melPos() {
+  // where in the loop the player is, compensating for the delay before they hear it
+  const c = engine.ctx;
+  const out = (c.outputLatency || 0.02) + (c.baseLatency || 0.01);
+  return (c.currentTime - out - melRec.loopStart) / engine.stepDur;
+}
 
-  // keys
-  const scaleName = `${NOTE_NAMES[song.root]} ${song.mode.toUpperCase()}`;
-  $("keysScale").textContent = scaleName;
-  const pcs = scalePitchClasses(song.root, song.mode);
-  const keys = $("keys");
-  keys.replaceChildren(
-    ...Array.from({ length: 8 }, (_, d) => {
+// ---------- TRACKS screen ----------
+function renderTracks() {
+  $("v-tempo").textContent = song.bpm;
+  $("v-key").textContent = keyLabel(song.root, song.mode);
+  $("v-loop").textContent = `${song.bars} BARS`;
+  $("v-taste").textContent = taste.count;
+  $("songTitle").textContent = (song.name || "UNTITLED ROT").toUpperCase();
+  $("tracksLabel").textContent = song.gen ? `TRACKS · GEN ${song.gen}` : "TRACKS";
+  $("keysLabel").textContent = `KEYS · ${NOTE_NAMES[song.root]} ${song.mode.toUpperCase()}`;
+  $("octVal").textContent = `OCT ${melOct > 0 ? "+" : ""}${melOct}`;
+
+  $("vibes").replaceChildren(...VIBES.map((vb) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "pill" + (vb.id === song.vibe ? " on" : "");
+    b.textContent = vb.name;
+    b.setAttribute("aria-pressed", vb.id === song.vibe);
+    b.onclick = () => { if (vb.id !== song.vibe || true) { setVibe(vb.id); buzz(10); } };
+    return b;
+  }));
+
+  // chord row
+  const row = $("chordRow");
+  row.innerHTML = `<span></span><div class="cells" style="grid-template-columns:repeat(${song.bars},minmax(0,1fr))"></div>`;
+  const cells = row.querySelector(".cells");
+  song.chords.forEach((n, i) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = parseNumeral(n, song.root).name;
+    b.setAttribute("aria-label", `Bar ${i + 1} chord ${b.textContent}, tap to change`);
+    b.onclick = () => openChordSheet(i);
+    cells.appendChild(b);
+  });
+
+  // lanes (built once)
+  const lanes = $("lanes");
+  if (!lanes.children.length) {
+    for (const p of LANES) {
       const b = document.createElement("button");
       b.type = "button";
-      b.className = "key";
-      b.dataset.deg = d;
-      b.textContent = NOTE_NAMES[pcs[d % 7]];
-      b.setAttribute("aria-label", `Play ${NOTE_NAMES[pcs[d % 7]]}`);
-      return b;
-    })
-  );
-  $("keysRec").classList.toggle("on", keysRecArmed);
-  $("keysRec").setAttribute("aria-pressed", keysRecArmed);
-  $("keysRec").textContent = keysRecArmed ? "LOOPING" : "LOOP IT";
-  $("keysClear").disabled = !song.keysLoop.length;
+      b.className = "lane";
+      b.dataset.part = p;
+      b.style.setProperty("--c", COLORS[p]);
+      b.innerHTML = `<span class="meta"><span class="lname">${LABELS[p]}</span><span class="lsub"></span></span><span class="cv"><canvas></canvas></span><span class="flash"></span>`;
+      bindHold(b, () => (p === "voice" ? openVoice() : openPart(p)), () => toggleMute(p));
+      lanes.appendChild(b);
+    }
+  }
+  for (const b of lanes.children) {
+    const p = b.dataset.part;
+    const muted = p === "voice" ? song.voiceMuted : song.parts[p].muted;
+    b.classList.toggle("muted", muted);
+    b.classList.toggle("locked", p !== "voice" && song.parts[p].locked);
+    b.querySelector(".lsub").textContent = laneSub(p);
+    b.setAttribute("aria-label", `${LABELS[p]}${muted ? ", muted" : ""}. Tap to open, hold to mute.`);
+  }
+  laneDirty = true;
+  $("keysDock").hidden = recMode !== "melody";
+  if (recMode === "melody") renderKeys();
+  renderTransport();
+}
 
-  // fx
-  for (const b of document.querySelectorAll("[data-fx]")) {
+function laneSub(p) {
+  if (p === "voice") {
+    const n = song.takes.length;
+    if (!n) return "TAP REC TO SING";
+    return `${n} TAKE${n > 1 ? "S" : ""} · ${song.fx.tune.toUpperCase()} TUNE`;
+  }
+  const part = song.parts[p];
+  const g = part.genes;
+  const word = (x, lo, mid, hi) => (x < 0.33 ? lo : x < 0.66 ? mid : hi);
+  if (p === "drums") return `${word(g[0], "SPARSE", "STEADY", "BUSY")} · ${word(g[1], "SOFT", "PUNCHY", "HARD")}`;
+  if (p === "bass") return `${vibe().bass.sound.toUpperCase()} · ${word(g[2], "STRAIGHT", "SOME SLIDES", "SLIDES")}`;
+  if (p === "chords") return `${part.pattern.style.toUpperCase()} · ${word(g[1], "DARK", "WARM", "BRIGHT")}`;
+  return part.edited ? `YOURS · ${part.notes.length} NOTES` : `${part.notes.length} NOTES · ${word(g[0], "SPARSE", "FLOWING", "BUSY")}`;
+}
+
+function toggleMute(p) {
+  commit();
+  if (p === "voice") song.voiceMuted = !song.voiceMuted;
+  else song.parts[p].muted = !song.parts[p].muted;
+  buzz(20);
+  toast(`${LABELS[p]} ${(p === "voice" ? song.voiceMuted : song.parts[p].muted) ? "muted" : "on"}`);
+  changed();
+}
+
+function renderTransport() {
+  $("play").classList.toggle("on", engine.playing);
+  $("play").setAttribute("aria-label", engine.playing ? "Stop" : "Play");
+  const rec = $("rec");
+  rec.classList.toggle("on", recording);
+  rec.style.setProperty("--rc", recMode === "melody" ? COLORS.melody : COLORS.voice);
+  rec.setAttribute("aria-label", recording ? "Stop recording" : recMode === "melody" ? "Record melody" : "Record voice");
+  for (const b of $("recMode").children) b.classList.toggle("on", b.dataset.mode === recMode);
+  $("undo").disabled = !history.length;
+}
+
+// ---------- keys (melody) ----------
+function renderKeys() {
+  const pcs = scalePitchClasses(song.root, song.mode);
+  $("keys").replaceChildren(...Array.from({ length: 8 }, (_, d) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "key" + (d % 7 === 0 ? " root" : "");
+    b.dataset.deg = d;
+    b.textContent = NOTE_NAMES[pcs[d % 7]];
+    b.setAttribute("aria-label", "Play " + b.textContent);
+    return b;
+  }));
+}
+const touching = new Map();
+function keyAt(x, y) {
+  const el = document.elementFromPoint(x, y);
+  return el && el.classList.contains("key") ? Number(el.dataset.deg) : null;
+}
+function press(pid, d) {
+  const deg = d + melOct * 7;
+  engine.noteDown(pid, deg);
+  touching.set(pid, d);
+  $("keys").children[d]?.classList.add("down");
+  buzz(6);
+  if (melRec && engine.ctx.currentTime >= melRec.loopStart - engine.stepDur / 2) {
+    melRec.down.set(pid, { deg, pos: melPos() });
+  }
+}
+function release(pid) {
+  const d = touching.get(pid);
+  if (d === undefined) return;
+  engine.noteUp(pid);
+  touching.delete(pid);
+  if (![...touching.values()].includes(d)) $("keys").children[d]?.classList.remove("down");
+  const st = melRec && melRec.down.get(pid);
+  if (st) {
+    melRec.down.delete(pid);
+    const n = engine.loopSteps;
+    const step = ((Math.round(st.pos) % n) + n) % n;
+    const len = Math.max(1, Math.min(8, Math.round(melPos() - st.pos)));
+    melRec.notes = melRec.notes.filter((x) => x.step !== step);
+    melRec.notes.push({ step, deg: st.deg, len });
+  }
+}
+$("keys").addEventListener("pointerdown", (e) => {
+  const d = keyAt(e.clientX, e.clientY);
+  if (d === null) return;
+  e.preventDefault();
+  $("keys").setPointerCapture?.(e.pointerId);
+  press(e.pointerId, d);
+});
+$("keys").addEventListener("pointermove", (e) => {
+  if (!touching.has(e.pointerId)) return;
+  const d = keyAt(e.clientX, e.clientY);
+  if (d !== null && d !== touching.get(e.pointerId)) {
+    release(e.pointerId);
+    press(e.pointerId, d);
+  }
+});
+for (const ev of ["pointerup", "pointercancel"]) $("keys").addEventListener(ev, (e) => release(e.pointerId));
+$("keys").addEventListener("contextmenu", (e) => e.preventDefault());
+$("octDn").onclick = () => { melOct = Math.max(-1, melOct - 1); renderTracks(); };
+$("octUp").onclick = () => { melOct = Math.min(1, melOct + 1); renderTracks(); };
+
+// ---------- PART screen ----------
+function openPart(p) {
+  curPart = p;
+  curBar = 0;
+  showScreen("s-part");
+  $("s-part").style.setProperty("--pc", COLORS[p]);
+  showPartTab("pattern");
+  renderPart();
+}
+function renderPart() {
+  const p = curPart;
+  const part = song.parts[p];
+  $("partName").textContent = LABELS[p];
+  $("partSub").textContent = `${vibe().name} · GEN ${song.gen}${part.edited ? " · HAND EDITED" : ""}`;
+  $("partLock").setAttribute("aria-pressed", part.locked);
+  $("partLock").setAttribute("aria-label", part.locked ? "Unlock part" : "Lock part");
+  renderEditor();
+  renderDials();
+  renderVars();
+  renderGenes();
+}
+function showPartTab(t) {
+  for (const b of $("partTabs").children) b.classList.toggle("on", b.dataset.tab === t);
+  $("pv-pattern").hidden = t !== "pattern";
+  $("pv-sound").hidden = t !== "sound";
+}
+for (const b of $("partTabs").children) b.onclick = () => showPartTab(b.dataset.tab);
+$("partBack").onclick = () => showScreen("s-tracks");
+$("partLock").onclick = () => {
+  const part = song.parts[curPart];
+  part.locked = !part.locked;
+  toast(part.locked ? `${LABELS[curPart]} locked: vibes and MUTATE skip it` : `${LABELS[curPart]} unlocked`);
+  changed();
+};
+
+// --- editors ---
+function renderEditor() {
+  const p = curPart;
+  const part = song.parts[p];
+  const ed = $("editor");
+  ed.innerHTML = "";
+  const mkRow = (label, arr, onTap, cls = () => "") => {
+    const row = document.createElement("div");
+    row.className = "erow";
+    row.innerHTML = `<span class="rl">${label}</span>`;
+    arr.forEach((v, i) => {
+      const c = document.createElement("button");
+      c.type = "button";
+      c.className = "cell" + (i % 4 === 0 ? " beat" : "") + (v ? " on" : "") + cls(v, i);
+      if (v > 1) c.dataset.r = "×" + v;
+      c.dataset.i = i;
+      c.setAttribute("aria-label", `${label} step ${i + 1} ${v ? "on" : "off"}`);
+      c.onclick = () => onTap(i);
+      row.appendChild(c);
+    });
+    ed.appendChild(row);
+    return row;
+  };
+  const edit = (fn) => { commit(); fn(); part.edited = true; light(); renderEditor(); renderTracks(); };
+  if (p === "drums") {
+    const d = part.pattern;
+    mkRow("KICK", d.kick, (i) => edit(() => { d.kick[i] = d.kick[i] ? 0 : 1; })).dataset.row = "kick";
+    mkRow("CLAP", d.clap, (i) => edit(() => { d.clap[i] = d.clap[i] ? 0 : 1; })).dataset.row = "clap";
+    mkRow("HATS", d.hat, (i) => edit(() => { d.hat[i] = (d.hat[i] + 1) % 5; }), (v) => (v > 1 ? " r" + v : "")).dataset.row = "hat";
+    mkRow("OPEN", d.ohat, (i) => edit(() => { d.ohat[i] = d.ohat[i] ? 0 : 1; })).dataset.row = "ohat";
+    hintLine(ed, "tap a hat repeatedly for rolls: ×2 ×3 ×4");
+  } else if (p === "bass") {
+    const d = part.pattern;
+    mkRow("HITS", d.rhythm, (i) => edit(() => { d.rhythm[i] = d.rhythm[i] ? 0 : 1; if (!d.rhythm[i]) d.oct[i] = 0; }));
+    mkRow("OCT UP", d.oct, (i) => edit(() => { d.oct[i] = d.oct[i] ? 0 : 1; if (d.oct[i]) d.rhythm[i] = 1; }));
+    hintLine(ed, "notes follow each bar's chord root");
+  } else if (p === "chords") {
+    const st = document.createElement("div");
+    st.className = "estyle";
+    for (const s of ["pad", "stabs", "arp"]) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = s.toUpperCase();
+      b.className = part.pattern.style === s ? "on" : "";
+      b.onclick = () => edit(() => { part.pattern.style = s; });
+      st.appendChild(b);
+    }
+    ed.appendChild(st);
+    mkRow("HITS", part.pattern.rhythm, (i) => edit(() => { part.pattern.rhythm[i] = part.pattern.rhythm[i] ? 0 : 1; }));
+    const np = document.createElement("button");
+    np.type = "button";
+    np.className = "eact";
+    np.textContent = "NEW PROGRESSION";
+    np.onclick = () => newProgression();
+    ed.appendChild(np);
+  } else if (p === "melody") {
+    renderMelodyEditor(ed, part);
+  }
+}
+function hintLine(parent, text) {
+  const h = document.createElement("div");
+  h.className = "hint";
+  h.style.paddingTop = "4px";
+  h.textContent = text;
+  parent.appendChild(h);
+}
+
+function renderMelodyEditor(ed, part) {
+  // bar pager
+  const pager = document.createElement("div");
+  pager.className = "epager";
+  const bars = document.createElement("div");
+  bars.className = "bars";
+  bars.style.gridTemplateColumns = `repeat(${Math.min(song.bars, 8)},minmax(0,1fr))`;
+  const pageStart = Math.floor(curBar / 8) * 8;
+  for (let b = pageStart; b < Math.min(song.bars, pageStart + 8); b++) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    const has = part.notes.some((n) => Math.floor(n.step / 16) === b);
+    btn.className = (b === curBar ? "on" : "") + (has ? " has" : "");
+    btn.innerHTML = `<span>${parseNumeral(song.chords[b], song.root).name}</span>`;
+    btn.setAttribute("aria-label", `Bar ${b + 1}`);
+    btn.onclick = () => { curBar = b; renderEditor(); };
+    bars.appendChild(btn);
+  }
+  pager.appendChild(bars);
+  if (song.bars > 8) {
+    const nx = document.createElement("button");
+    nx.type = "button";
+    nx.className = "chipbtn";
+    nx.textContent = "›";
+    nx.setAttribute("aria-label", "Next 8 bars");
+    nx.onclick = () => { curBar = (pageStart + 8) % song.bars; renderEditor(); };
+    pager.appendChild(nx);
+  }
+  ed.appendChild(pager);
+  // rows: scale degrees, high at top
+  const degs = part.notes.map((n) => n.deg);
+  const top = Math.max(9, ...degs);
+  const bottom = Math.min(0, ...degs);
+  const pcs = scalePitchClasses(song.root, song.mode);
+  const cd = chordDegrees(song.chords[curBar], song.root, song.mode).map((x) => ((x % 7) + 7) % 7);
+  const inBar = part.notes.filter((n) => Math.floor(n.step / 16) === curBar);
+  for (let d = top; d >= bottom; d--) {
+    const row = document.createElement("div");
+    row.className = "erow";
+    const pc = pcs[((d % 7) + 7) % 7];
+    const ct = cd.includes(((d % 7) + 7) % 7);
+    row.innerHTML = `<span class="rl" style="color:${ct ? "var(--fg)" : ""}">${NOTE_NAMES[pc]}${ct ? "•" : ""}</span>`;
+    for (let s = 0; s < 16; s++) {
+      const step = curBar * 16 + s;
+      const start = inBar.find((n) => n.deg === d && n.step === step);
+      const tail = !start && inBar.find((n) => n.deg === d && n.step < step && n.step + n.len > step);
+      const c = document.createElement("button");
+      c.type = "button";
+      c.className = "cell" + (s % 4 === 0 ? " beat" : "") + (start ? " on" : tail ? " tail" : "");
+      c.dataset.i = s;
+      c.setAttribute("aria-label", `${NOTE_NAMES[pc]} step ${s + 1} ${start ? "note" : "empty"}`);
+      bindHold(c, () => {
+        commit();
+        if (start) part.notes = part.notes.filter((n) => n !== start);
+        else if (tail) tail.len = step - tail.step;
+        else {
+          part.notes = part.notes.filter((n) => n.step !== step);
+          part.notes.push({ step, deg: d, len: 2 });
+          engine.noteDown("ed", d);
+          setTimeout(() => engine.noteUp("ed"), 160);
+        }
+        part.notes.sort((a, b) => a.step - b.step);
+        part.edited = true;
+        light();
+        renderEditor();
+        renderTracks();
+      }, () => {
+        if (!start) return;
+        commit();
+        start.len = start.len >= 8 ? 1 : start.len * 2;
+        part.edited = true;
+        light();
+        renderEditor();
+        buzz(15);
+      });
+      row.appendChild(c);
+    }
+    ed.appendChild(row);
+  }
+  hintLine(ed, "tap: add / remove · hold a note: make it longer · • = chord note");
+}
+
+function newProgression() {
+  commit();
+  const v = vibe();
+  const cur = song.chords.slice(0, 4).join(" ");
+  const opts = v.progressions.filter((p) => p !== cur);
+  let prog = pick(opts.length ? opts : v.progressions).split(" ");
+  if (Math.random() < 0.35) prog[Math.floor(Math.random() * prog.length)] = pick(SWAP_OPTIONS[song.mode]);
+  song.chords = extendChords(prog, song.bars);
+  rebuildFollowers();
+  toast("New progression");
+  changed({ reprocess: false });
+}
+function rebuildFollowers() {
+  if (!song.parts.melody.edited && !song.parts.melody.locked) build("melody", song, vibe());
+}
+
+// --- dials ---
+const GEN_GENES = { drums: [0], bass: [0, 3], chords: [0], melody: [0, 1, 2, 3] };
+const DIAL_COLORS = ["var(--pc)", "#ff2e4d", "#ffb020", "#00e5ff"];
+function renderDials() {
+  const p = curPart;
+  const part = song.parts[p];
+  const box = $("dials");
+  box.innerHTML = "";
+  GENE_NAMES[p].forEach((name, i) => {
+    const d = document.createElement("div");
+    d.className = "dial";
+    d.style.setProperty("--dc", DIAL_COLORS[i]);
+    d.setAttribute("role", "slider");
+    d.setAttribute("tabindex", "0");
+    d.setAttribute("aria-label", name);
+    d.setAttribute("aria-valuemin", "0");
+    d.setAttribute("aria-valuemax", "100");
+    d.innerHTML = `<svg viewBox="0 0 76 76" aria-hidden="true"><circle class="trk" cx="38" cy="38" r="30" stroke-dasharray="141.4 200" transform="rotate(135 38 38)"/><circle class="val" cx="38" cy="38" r="30" transform="rotate(135 38 38)"/><text x="38" y="43" text-anchor="middle"></text></svg><span class="dn">${name}</span>`;
+    const upd = () => {
+      const v = part.genes[i];
+      d.querySelector(".val").setAttribute("stroke-dasharray", `${(141.4 * v).toFixed(1)} 200`);
+      d.querySelector("text").textContent = Math.round(v * 100);
+      d.setAttribute("aria-valuenow", Math.round(v * 100));
+    };
+    upd();
+    let sy = 0;
+    let sv = 0;
+    let raf = 0;
+    d.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      d.setPointerCapture(e.pointerId);
+      sy = e.clientY;
+      sv = part.genes[i];
+      commit();
+      d.classList.add("drag");
+    });
+    d.addEventListener("pointermove", (e) => {
+      if (!d.classList.contains("drag")) return;
+      const v = clamp01(sv + (sy - e.clientY) / 160);
+      if (Math.abs(v - part.genes[i]) < 0.004) return;
+      part.genes[i] = v;
+      upd();
+      if (!raf) raf = requestAnimationFrame(() => {
+        raf = 0;
+        setGene(p, i);
+      });
+    });
+    const end = () => {
+      if (!d.classList.contains("drag")) return;
+      d.classList.remove("drag");
+      renderTracks();
+      renderVarsMatch();
+    };
+    d.addEventListener("pointerup", end);
+    d.addEventListener("pointercancel", end);
+    d.addEventListener("keydown", (e) => {
+      const step = e.key === "ArrowUp" || e.key === "ArrowRight" ? 0.05 : e.key === "ArrowDown" || e.key === "ArrowLeft" ? -0.05 : 0;
+      if (!step) return;
+      e.preventDefault();
+      commit();
+      part.genes[i] = clamp01(part.genes[i] + step);
+      upd();
+      setGene(p, i);
+      renderTracks();
+    });
+    box.appendChild(d);
+  });
+}
+function setGene(p, i) {
+  const part = song.parts[p];
+  if (GEN_GENES[p].includes(i)) {
+    build(p, song, vibe());
+    if (p === "drums" && !song.parts.bass.locked && !song.parts.bass.edited) build("bass", song, vibe());
+    renderEditor();
+  }
+  light();
+  $("partSub").textContent = `${vibe().name} · GEN ${song.gen}`;
+  part.edited = false;
+}
+
+// --- variations ---
+function renderVars() {
+  const p = curPart;
+  if (!varCache[p]) varCache[p] = variations(p, song, vibe(), taste, { drift }).map((v) => ({ ...v, state: "new" }));
+  const box = $("vars");
+  box.innerHTML = "";
+  varCache[p].forEach((v, idx) => box.appendChild(varCard(p, v, idx)));
+}
+function renderVarsMatch() { /* scores refresh on next batch */ }
+const lastTaps = {};
+function varCard(p, v, idx) {
+  const el = document.createElement("button");
+  el.type = "button";
+  el.className = "var" + (v.kind === "wild" ? " wild" : "") + (v.state === "kept" ? " kept" : "") + (v.state === "playing" ? " playing" : "");
+  el.innerHTML = `<canvas></canvas><span class="vfoot"><span class="vt">${v.state === "kept" ? "KEPT" : v.state === "playing" ? "PLAYING" : v.kind === "wild" ? "WILD" : "NEW"}</span><span class="vm">${taste[p].n ? v.match + "%" : ""}</span></span>`;
+  el.setAttribute("aria-label", `Variation ${idx + 1}, ${v.match} percent match. Tap to try, double tap to keep.`);
+  requestAnimationFrame(() => drawMini(el.querySelector("canvas"), p, v.part));
+  let sx = 0;
+  let moved = false;
+  el.addEventListener("pointerdown", (e) => { sx = e.clientX; moved = false; });
+  el.addEventListener("pointermove", (e) => {
+    const dx = e.clientX - sx;
+    if (dx < -8) { moved = true; el.style.transform = `translateX(${dx}px)`; el.style.opacity = String(1 + dx / 200); }
+  });
+  el.addEventListener("pointerup", (e) => {
+    const dx = e.clientX - sx;
+    el.style.transform = "";
+    el.style.opacity = "";
+    if (dx < -60) return killVar(p, idx, el);
+    if (moved) return;
+    const now = performance.now();
+    const key = p + idx;
+    if (now - (lastTaps[key] || 0) < 350) { lastTaps[key] = 0; keepVar(p, idx); }
+    else { lastTaps[key] = now; tryVar(p, idx); }
+  });
+  el.addEventListener("pointercancel", () => { el.style.transform = ""; el.style.opacity = ""; });
+  return el;
+}
+function applyGenome(p, g) {
+  const part = song.parts[p];
+  part.genes = [...g.genes];
+  part.seed = g.seed;
+  if (g.pattern) part.pattern = JSON.parse(JSON.stringify(g.pattern));
+  if (g.notes) part.notes = JSON.parse(JSON.stringify(g.notes));
+  part.edited = false;
+}
+function tryVar(p, idx) {
+  const v = varCache[p][idx];
+  commit();
+  applyGenome(p, v.part);
+  for (const o of varCache[p]) if (o.state === "playing") o.state = "new";
+  if (v.state !== "kept") v.state = "playing";
+  buzz(8);
+  if (!engine.playing) engine.start().then(renderTransport);
+  changed();
+}
+function keepVar(p, idx) {
+  const v = varCache[p][idx];
+  learn(taste, p, v.part, song.bars, 1);
+  saveTaste();
+  v.state = "kept";
+  applyGenome(p, v.part);
+  buzz([10, 30, 10]);
+  toast(`Kept · taste learned from ${taste.count} choices`);
+  changed();
+}
+function killVar(p, idx, el) {
+  const v = varCache[p][idx];
+  learn(taste, p, v.part, song.bars, -1);
+  saveTaste();
+  buzz(25);
+  el.classList.add("gone");
+  setTimeout(() => {
+    const fresh = variations(p, song, vibe(), taste, { drift, pool: 20, show: 1 })[0];
+    varCache[p][idx] = { ...fresh, state: "new" };
+    const card = varCard(p, varCache[p][idx], idx);
+    card.classList.add("born");
+    el.replaceWith(card);
+    $("v-taste").textContent = taste.count;
+  }, 180);
+}
+function drawMini(cv, p, g) {
+  const dpr = Math.min(2, devicePixelRatio || 1);
+  const w = cv.clientWidth * dpr;
+  const h = cv.clientHeight * dpr;
+  cv.width = w;
+  cv.height = h;
+  const x = cv.getContext("2d");
+  const col = COLORS[p];
+  const cellW = w / 16;
+  x.fillStyle = "#161a16";
+  for (let i = 0; i < 16; i++) x.fillRect(i * cellW + 1, 0, cellW - 2, h);
+  x.fillStyle = col;
+  if (p === "drums") {
+    g.pattern.kick.forEach((v, i) => v && x.fillRect(i * cellW + 1, h * 0.6, cellW - 2, h * 0.4));
+    g.pattern.clap.forEach((v, i) => v && x.fillRect(i * cellW + 1, h * 0.3, cellW - 2, h * 0.25));
+    x.globalAlpha = 0.7;
+    g.pattern.hat.forEach((v, i) => v && x.fillRect(i * cellW + 1, 0, cellW - 2, h * (0.08 * v + 0.08)));
+    x.globalAlpha = 1;
+  } else if (p === "bass") {
+    g.pattern.rhythm.forEach((v, i) => v && x.fillRect(i * cellW + 1, g.pattern.oct[i] ? 0 : h * 0.45, cellW - 2, h * 0.55));
+  } else if (p === "chords") {
+    g.pattern.rhythm.forEach((v, i) => v && x.fillRect(i * cellW + 1, h * 0.1, cellW - 2, h * 0.8));
+  } else {
+    const ns = g.notes.filter((n) => n.step < 32);
+    const lo = Math.min(0, ...ns.map((n) => n.deg));
+    const hi = Math.max(9, ...ns.map((n) => n.deg));
+    const cw = w / 32;
+    ns.forEach((n) => x.fillRect(n.step * cw, h - ((n.deg - lo + 1) / (hi - lo + 2)) * h, Math.max(cw, n.len * cw - 1), Math.max(3, h / 10)));
+  }
+}
+$("newBatch").onclick = () => { delete varCache[curPart]; renderVars(); buzz(8); };
+$("drift").oninput = () => { drift = Number($("drift").value); };
+$("drift").onchange = () => { delete varCache[curPart]; renderVars(); };
+$("randomVibe").onclick = () => {
+  commit();
+  const p = curPart;
+  const part = song.parts[p];
+  const base = vibe().genes?.[p] || part.genes;
+  part.genes = base.map((g) => clamp01(g + (Math.random() - 0.5) * 0.5));
+  part.seed = newSeed();
+  build(p, song, vibe());
+  delete varCache[p];
+  buzz(10);
+  changed();
+};
+$("moreLike").onclick = () => {
+  delete varCache[curPart];
+  varCache[curPart] = variations(curPart, song, vibe(), taste, { drift: drift * 0.5 }).map((v) => ({ ...v, state: "new" }));
+  renderVars();
+  buzz(8);
+  toast("6 close relatives of what's playing");
+};
+
+// --- SOUND genes ---
+function renderGenes() {
+  const p = curPart;
+  const part = song.parts[p];
+  const box = $("genes");
+  box.innerHTML = "";
+  SOUND_GENES[p].forEach(([name, , lo, hi], i) => {
+    const row = document.createElement("div");
+    row.className = "gene";
+    row.innerHTML = `<span class="gn">${name}</span><div class="gbar" role="slider" tabindex="0" aria-label="${name}" aria-valuemin="0" aria-valuemax="100"><span class="fill"></span><span class="range" style="left:${lo * 100}%;width:${(hi - lo) * 100}%"></span><span class="gv"></span></div><button type="button" class="glock" aria-pressed="${part.soundLock[i]}" aria-label="Lock ${name}"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></button>`;
+    const bar = row.querySelector(".gbar");
+    const upd = () => {
+      row.querySelector(".fill").style.width = part.sound[i] * 100 + "%";
+      row.querySelector(".gv").textContent = Math.round(part.sound[i] * 100);
+      bar.setAttribute("aria-valuenow", Math.round(part.sound[i] * 100));
+    };
+    upd();
+    const set = (e) => {
+      const r = bar.getBoundingClientRect();
+      part.sound[i] = clamp01((e.clientX - r.left) / r.width);
+      upd();
+      light();
+    };
+    bar.addEventListener("pointerdown", (e) => { e.preventDefault(); bar.setPointerCapture(e.pointerId); commit(); set(e); bar.dataset.drag = "1"; });
+    bar.addEventListener("pointermove", (e) => { if (bar.dataset.drag) set(e); });
+    bar.addEventListener("pointerup", () => { delete bar.dataset.drag; preview(p); });
+    bar.addEventListener("keydown", (e) => {
+      const st = e.key === "ArrowRight" ? 0.05 : e.key === "ArrowLeft" ? -0.05 : 0;
+      if (!st) return;
+      commit();
+      part.sound[i] = clamp01(part.sound[i] + st);
+      upd();
+      light();
+    });
+    row.querySelector(".glock").onclick = (e) => {
+      part.soundLock[i] = !part.soundLock[i];
+      e.currentTarget.setAttribute("aria-pressed", part.soundLock[i]);
+      light();
+    };
+    box.appendChild(row);
+  });
+}
+function preview(p) {
+  if (engine.playing) return;
+  if (p === "melody") { engine.noteDown("pv", 4); setTimeout(() => engine.noteUp("pv"), 300); }
+  else engine.auditionChord(0);
+}
+$("soundRandom").onclick = () => {
+  commit();
+  const part = song.parts[curPart];
+  SOUND_GENES[curPart].forEach(([, , lo, hi], i) => { if (!part.soundLock[i]) part.sound[i] = lo + Math.random() * (hi - lo); });
+  renderGenes();
+  light();
+  preview(curPart);
+  buzz(10);
+};
+$("soundReset").onclick = () => {
+  commit();
+  const part = song.parts[curPart];
+  SOUND_GENES[curPart].forEach(([, def], i) => { if (!part.soundLock[i]) part.sound[i] = def; });
+  renderGenes();
+  light();
+};
+
+// ---------- VOICE screen ----------
+function openVoice() {
+  showScreen("s-voice");
+  renderVoice();
+}
+function renderVoiceSub() {
+  const n = song.takes.length;
+  $("voiceSub").textContent = processing ? "PROCESSING…" : n ? `${n} TAKE${n > 1 ? "S" : ""} · SNAPPED TO ${keyLabel(song.root, song.mode)}` : "NO TAKES YET";
+  laneDirty = true;
+}
+function renderVoice() {
+  renderVoiceSub();
+  $("voiceMute").setAttribute("aria-pressed", song.voiceMuted);
+  for (const b of $("fx").children) {
     const k = b.dataset.fx;
     if (k === "tune") {
       b.textContent = "TUNE: " + song.fx.tune.toUpperCase();
@@ -275,186 +931,64 @@ function render() {
       b.setAttribute("aria-pressed", !!song.fx[k]);
     }
   }
-  for (const b of document.querySelectorAll("[data-mute]")) {
-    const m = !!song.mute[b.dataset.mute];
-    b.classList.toggle("on", m);
-    b.setAttribute("aria-pressed", m);
-  }
-
-  // mix
-  for (const k of Object.keys(DEFAULT_MIX)) {
-    const el = $("m-" + k);
-    if (el) el.value = song.mix[k];
-  }
-  const locked = song.takes.length > 0;
-  $("bpm").value = song.bpm;
-  $("bpm").disabled = locked;
-  $("bpmVal").textContent = `${song.bpm} BPM`;
-  $("bpmLock").textContent = locked ? "LOCKED: VOCALS RECORDED AT THIS TEMPO" : "";
-  $("swing").value = song.swing;
-  $("swingVal").textContent = `SWING ${Math.round(song.swing * 100)}%`;
-  $("root").value = song.root;
-  $("mode").value = song.mode;
-  $("lead").value = song.lead;
-  $("songName").value = song.name || "";
-
-  renderVoxLabel();
+  $("m-rev").value = song.mix.rev;
+  $("m-dly").value = song.mix.dly;
+  const lat = lsGet("voxrot.lat");
+  $("syncVal").textContent = lat ? `${Math.round(Number(lat) * 1000)} MS MEASURED` : "not calibrated";
   renderTakes();
-  renderTransport();
 }
-
-function renderVoxLabel() {
-  const n = song.takes.length;
-  $("voxLabel").textContent = processing
-    ? "VOX · PROCESSING"
-    : n
-      ? `VOX · ${n} TAKE${n > 1 ? "S" : ""} · SNAPPED`
-      : "VOX · NO TAKES YET";
-  $("voxTime").textContent = lsGet("voxrot.lat") ? `SYNC ${Math.round(Number(lsGet("voxrot.lat")) * 1000)} MS` : "HEADPHONES ON";
-}
-
-function renderTransport() {
-  $("play").classList.toggle("on", engine.playing);
-  $("play").setAttribute("aria-label", engine.playing ? "Stop" : "Play");
-  $("rec").classList.toggle("on", recording);
-  $("rec").setAttribute("aria-label", recording ? "Cancel recording" : "Record vocal");
-  document.body.classList.toggle("recording", recording);
-}
-
 function renderTakes() {
   const box = $("takes");
   if (!song.takes.length) {
-    box.innerHTML = `<p class="empty">No takes yet. Hit the eye on MAKE, wait for the 4 clicks, sing over one loop.</p>`;
+    box.innerHTML = `<p class="empty">No takes yet. On TRACKS, pick REC VOICE, hit the red button, wait for the 4 clicks, sing over the loop.</p>`;
     return;
   }
-  box.replaceChildren(
-    ...song.takes.map((tk, i) => {
-      const row = document.createElement("div");
-      row.className = "take" + (tk.on ? "" : " off");
-      const name = `TAKE ${String(i + 1).padStart(2, "0")}`;
-      row.innerHTML = `
-        <div class="take-top">
-          <button type="button" class="mini tk-on" aria-pressed="${tk.on}">${tk.on ? "ON" : "OFF"}</button>
-          <span class="take-name">${name}</span>
-          <button type="button" class="mini danger tk-del">DELETE</button>
-        </div>
-        <label class="fader"><span class="tk-sync">SYNC ${tk.nudge > 0 ? "+" : ""}${tk.nudge} MS</span>
-          <input type="range" min="-200" max="200" step="5" value="${tk.nudge}" id="sync-${tk.id}">
-        </label>`;
-      row.querySelector(".tk-on").onclick = () => { tk.on = !tk.on; changed(); };
-      const del = row.querySelector(".tk-del");
-      let armed = false;
-      del.onclick = () => {
-        if (!armed) {
-          armed = true;
-          del.textContent = "SURE?";
-          setTimeout(() => { armed = false; del.textContent = "DELETE"; }, 2500);
-          return;
-        }
-        song.takes = song.takes.filter((t) => t !== tk);
-        changed();
-      };
-      const sl = row.querySelector("input");
-      sl.oninput = () => {
-        tk.nudge = Number(sl.value);
-        row.querySelector(".tk-sync").textContent = `SYNC ${tk.nudge > 0 ? "+" : ""}${tk.nudge} MS`;
-      };
-      sl.onchange = async () => {
-        if (song.fx.stutter) await processOne(tk);
-        changed({ structure: false });
-      };
-      return row;
-    })
-  );
+  box.replaceChildren(...song.takes.map((tk, i) => {
+    const row = document.createElement("div");
+    row.className = "take" + (tk.on ? "" : " off");
+    row.innerHTML = `<div class="take-top"><button type="button" class="mini ${tk.on ? "on" : ""}" aria-pressed="${tk.on}">${tk.on ? "ON" : "OFF"}</button><span class="take-name">TAKE ${String(i + 1).padStart(2, "0")}</span><button type="button" class="mini danger">DELETE</button></div><canvas></canvas><label class="fader"><span class="tk-sync">SYNC ${tk.nudge > 0 ? "+" : ""}${tk.nudge} MS</span><input type="range" min="-200" max="200" step="5" value="${tk.nudge}" id="sync-${tk.id}"></label>`;
+    const [onBtn, del] = row.querySelectorAll("button");
+    onBtn.onclick = () => { commit(); tk.on = !tk.on; changed(); };
+    let armed = false;
+    del.onclick = () => {
+      if (!armed) {
+        armed = true;
+        del.textContent = "SURE?";
+        setTimeout(() => { armed = false; del.textContent = "DELETE"; }, 2500);
+        return;
+      }
+      commit();
+      song.takes = song.takes.filter((t) => t !== tk);
+      changed();
+    };
+    const sl = row.querySelector("input");
+    sl.oninput = () => {
+      tk.nudge = Number(sl.value);
+      row.querySelector(".tk-sync").textContent = `SYNC ${tk.nudge > 0 ? "+" : ""}${tk.nudge} MS`;
+    };
+    sl.onchange = async () => { await processOne(tk); changed(); };
+    requestAnimationFrame(() => drawPeaks(row.querySelector("canvas"), tk.peaks));
+    return row;
+  }));
 }
-
-// tap vs hold on a pad
-function bindHold(el, onTap, onHold) {
-  let timer = null;
-  let held = false;
-  el.addEventListener("pointerdown", (e) => {
-    e.preventDefault();
-    held = false;
-    el.classList.add("press");
-    timer = setTimeout(() => { held = true; onHold(); }, 450);
-  });
-  const end = () => {
-    el.classList.remove("press");
-    if (timer) {
-      clearTimeout(timer);
-      timer = null;
-      if (!held) onTap();
-    }
-  };
-  el.addEventListener("pointerup", end);
-  el.addEventListener("pointerleave", () => { el.classList.remove("press"); clearTimeout(timer); timer = null; });
-  el.addEventListener("contextmenu", (e) => e.preventDefault());
-}
-
-// ---------- keyboard (multi-touch + slide) ----------
-const touching = new Map(); // pointerId -> deg
-function keyAt(x, y) {
-  const el = document.elementFromPoint(x, y);
-  return el && el.classList.contains("key") ? Number(el.dataset.deg) : null;
-}
-function press(pid, deg) {
-  engine.keyDown(pid, deg);
-  touching.set(pid, deg);
-  $("keys").children[deg]?.classList.add("down");
-  buzz(6);
-  if (keysRecArmed && engine.playing) {
-    const pos = engine.position();
-    const step = Math.round(pos) % LOOP_STEPS;
-    if (!song.keysLoop.some((e) => e.step === step && e.deg === deg)) {
-      song.keysLoop.push({ step, deg });
-      $("keysClear").disabled = false;
-      changed({ structure: false });
-    }
+function drawPeaks(cv, peaks) {
+  if (!cv || !peaks) return;
+  const dpr = Math.min(2, devicePixelRatio || 1);
+  cv.width = cv.clientWidth * dpr;
+  cv.height = cv.clientHeight * dpr;
+  const x = cv.getContext("2d");
+  x.fillStyle = COLORS.voice;
+  const bw = cv.width / peaks.length;
+  for (let i = 0; i < peaks.length; i++) {
+    const h = Math.max(1, peaks[i] * cv.height);
+    x.fillRect(i * bw, (cv.height - h) / 2, Math.max(1, bw - 0.5), h);
   }
 }
-function release(pid) {
-  const deg = touching.get(pid);
-  if (deg === undefined) return;
-  engine.keyUp(pid);
-  touching.delete(pid);
-  if (![...touching.values()].includes(deg)) $("keys").children[deg]?.classList.remove("down");
-}
-$("keys").addEventListener("pointerdown", (e) => {
-  const deg = keyAt(e.clientX, e.clientY);
-  if (deg === null) return;
-  e.preventDefault();
-  $("keys").setPointerCapture?.(e.pointerId);
-  press(e.pointerId, deg);
-});
-$("keys").addEventListener("pointermove", (e) => {
-  if (!touching.has(e.pointerId)) return;
-  const deg = keyAt(e.clientX, e.clientY);
-  if (deg !== null && deg !== touching.get(e.pointerId)) {
-    release(e.pointerId);
-    press(e.pointerId, deg);
-  }
-});
-for (const ev of ["pointerup", "pointercancel"]) $("keys").addEventListener(ev, (e) => release(e.pointerId));
-$("keys").addEventListener("contextmenu", (e) => e.preventDefault());
-
-// ---------- controls ----------
-$("reroll").onclick = () => { reroll(); buzz(12); };
-$("octDown").onclick = () => { song.keyOct = Math.max(2, song.keyOct - 1); changed({ structure: false }); toast(`Keys octave ${song.keyOct}`); };
-$("octUp").onclick = () => { song.keyOct = Math.min(6, song.keyOct + 1); changed({ structure: false }); toast(`Keys octave ${song.keyOct}`); };
-$("keysRec").onclick = async () => {
-  keysRecArmed = !keysRecArmed;
-  if (keysRecArmed && !engine.playing) { await engine.start(); renderTransport(); }
-  render();
-};
-$("keysClear").onclick = () => {
-  song.keysLoop = [];
-  keysRecArmed = false;
-  changed();
-  toast("Melody cleared");
-};
-
-for (const b of document.querySelectorAll("[data-fx]")) {
+$("voiceBack").onclick = () => showScreen("s-tracks");
+$("voiceMute").onclick = () => toggleMute("voice");
+for (const b of $("fx").children) {
   b.onclick = () => {
+    commit();
     const k = b.dataset.fx;
     if (k === "tune") {
       const order = ["hard", "med", "soft", "off"];
@@ -464,57 +998,16 @@ for (const b of document.querySelectorAll("[data-fx]")) {
     changed({ reprocess: true });
   };
 }
-for (const b of document.querySelectorAll("[data-mute]")) {
-  b.onclick = () => { song.mute[b.dataset.mute] = !song.mute[b.dataset.mute]; changed(); };
-}
-
-$("play").onclick = async () => {
-  if (recording) return;
-  if (engine.playing) engine.stop();
-  else await engine.start();
-  renderTransport();
-};
-$("rec").onclick = doRecord;
-$("export").onclick = () => exportSong(true);
-$("bpmChip").onclick = () => showTab("mix");
-$("keyChip").onclick = () => showTab("mix");
-
-for (const k of Object.keys(DEFAULT_MIX)) {
-  const el = $("m-" + k);
-  if (!el) continue;
-  el.oninput = () => { song.mix[k] = Number(el.value); changed({ structure: false }); };
-}
-$("bpm").oninput = () => {
-  song.bpm = Number($("bpm").value);
-  $("bpmVal").textContent = `${song.bpm} BPM`;
-  $("bpmChip").textContent = `${song.bpm} BPM`;
-  changed({ structure: false });
-};
-$("swing").oninput = () => {
-  song.swing = Number($("swing").value);
-  $("swingVal").textContent = `SWING ${Math.round(song.swing * 100)}%`;
-  changed({ structure: false });
-};
-$("root").innerHTML = NOTE_NAMES.map((n, i) => `<option value="${i}">${n}</option>`).join("");
-$("root").onchange = () => { song.root = Number($("root").value); changed({ reprocess: true }); };
-$("mode").onchange = () => {
-  song.mode = $("mode").value;
-  // keep progressions playable: swap numerals into the new mode's set where needed
-  song.prog = song.prog.map((n) => (SWAP_OPTIONS[song.mode].includes(n) ? n : song.mode === "minor" ? "i" : "I"));
-  changed({ reprocess: true });
-};
-$("lead").onchange = () => { song.lead = $("lead").value; changed({ structure: false }); };
-$("songName").oninput = () => { song.name = $("songName").value; changed({ structure: false }); };
-
+$("m-rev").oninput = () => { song.mix.rev = Number($("m-rev").value); light(); };
+$("m-dly").oninput = () => { song.mix.dly = Number($("m-dly").value); light(); };
 $("calibrate").onclick = async () => {
   const b = $("calibrate");
   b.disabled = true;
-  b.textContent = "LISTENING...";
+  b.textContent = "LISTENING…";
   try {
     const lat = await engine.calibrate();
-    if (lat === null) {
-      toast("Couldn't hear the beeps. Headphones off, volume up, try again.");
-    } else {
+    if (lat === null) toast("Couldn't hear the beeps. Headphones off, volume up, try again.");
+    else {
       lsSet("voxrot.lat", lat.toFixed(4));
       toast(`Sync set: ${Math.round(lat * 1000)} ms. New takes use it.`);
     }
@@ -523,261 +1016,462 @@ $("calibrate").onclick = async () => {
   }
   b.disabled = false;
   b.textContent = "CALIBRATE SYNC";
-  renderVoxLabel();
+  renderVoice();
 };
 
-// ---------- tabs ----------
-function showTab(name) {
-  for (const b of document.querySelectorAll("#tabs button")) b.classList.toggle("on", b.dataset.tab === name);
-  for (const p of ["make", "vox", "mix", "songs"]) $("p-" + p).hidden = p !== name;
-  if (name === "songs") renderSongs();
-  lsSet("voxrot.tab", name);
+// ---------- screens ----------
+function showScreen(id) {
+  const order = ["s-tracks", "s-part", "s-voice"];
+  for (const s of order) {
+    const el = $(s);
+    if (s === id) {
+      el.hidden = false;
+      el.classList.remove("under");
+      if (s !== "s-tracks") {
+        el.classList.add("enter");
+        requestAnimationFrame(() => requestAnimationFrame(() => el.classList.remove("enter")));
+      }
+    } else if (s === "s-tracks") {
+      el.classList.add("under");
+    } else el.hidden = true;
+  }
+  if (id === "s-tracks") { $("s-tracks").classList.remove("under"); curPart = null; renderTracks(); }
 }
-for (const b of document.querySelectorAll("#tabs button")) b.onclick = () => showTab(b.dataset.tab);
 
-// ---------- engine events ----------
-let curStep = -1;
-engine.on("step", (st) => {
-  curStep = st;
-  const steps = $("steps").children;
-  for (let i = 0; i < steps.length; i++) steps[i].classList.toggle("on", st >= 0 && i === st % 16);
-  const bar = st >= 0 ? Math.floor(st / 16) : -1;
-  const pads = $("pads").children;
-  for (let i = 0; i < pads.length; i++) pads[i].classList.toggle("now", i === bar);
-  if (st >= 0 && st % 16 === 0) glitch(st === 0);
-  if (st >= 0) {
-    const v = vibeById(song.vibe);
-    if (v.drums.kick[st % 16] === "x") kickFlash = 1;
+// ---------- sheet ----------
+function openSheet(title, build) {
+  $("sheetTitle").textContent = title;
+  const body = $("sheetBody");
+  body.innerHTML = "";
+  build(body);
+  $("sheet").hidden = false;
+  $("scrim").hidden = false;
+}
+function closeSheet() {
+  $("sheet").hidden = true;
+  $("scrim").hidden = true;
+}
+$("sheetClose").onclick = closeSheet;
+$("scrim").onclick = closeSheet;
+const el = (tag, cls, html) => { const e = document.createElement(tag); if (cls) e.className = cls; if (html !== undefined) e.innerHTML = html; return e; };
+function optBtn(label, on, fn, small) {
+  const b = el("button", "opt" + (on ? " on" : ""));
+  b.type = "button";
+  b.innerHTML = label + (small ? `<small>${small}</small>` : "");
+  b.onclick = fn;
+  return b;
+}
+
+$("st-tempo").onclick = () => openSheet("TEMPO", (body) => {
+  const locked = song.takes.length > 0;
+  const lab = el("div", "label", `<span>${song.bpm} BPM</span><span class="hint">${locked ? "locked: vocals recorded at this tempo" : vibe().name + " sits around " + vibe().bpm}</span>`);
+  const r = el("input");
+  r.type = "range"; r.min = 70; r.max = 210; r.step = 1; r.value = song.bpm; r.disabled = locked; r.setAttribute("aria-label", "Tempo");
+  r.onpointerdown = () => commit();
+  r.oninput = () => { song.bpm = Number(r.value); lab.firstChild.textContent = `${song.bpm} BPM`; $("v-tempo").textContent = song.bpm; light(); };
+  r.onchange = () => changed();
+  body.append(lab, r);
+  const g = el("div", "grid4");
+  for (const d of [-10, -1, 1, 10]) g.appendChild(optBtn(d > 0 ? `+${d}` : `${d}`, false, () => { if (locked) return; commit(); song.bpm = Math.max(70, Math.min(210, song.bpm + d)); r.value = song.bpm; lab.firstChild.textContent = `${song.bpm} BPM`; changed(); }));
+  body.appendChild(g);
+});
+$("st-key").onclick = () => openSheet("KEY", (body) => {
+  const g = el("div", "grid4");
+  NOTE_NAMES.forEach((n, i) => g.appendChild(optBtn(n, i === song.root, () => { commit(); song.root = i; changed({ reprocess: true }); closeSheet(); })));
+  const m = el("div", "grid3");
+  m.style.gridTemplateColumns = "repeat(2,minmax(0,1fr))";
+  for (const mode of ["minor", "major"]) m.appendChild(optBtn(mode.toUpperCase(), song.mode === mode, () => {
+    commit();
+    song.mode = mode;
+    song.chords = song.chords.map((n) => (SWAP_OPTIONS[mode].includes(n) ? n : mode === "minor" ? "i" : "I"));
+    rebuildFollowers();
+    changed({ reprocess: true });
+    closeSheet();
+  }, mode === "minor" ? "dark, most of these vibes" : "brighter, digi / glitter"));
+  body.append(g, m, el("p", "hint block", song.takes.length ? "Your takes re-snap to the new key." : "Chords and melody move with the key."));
+});
+$("st-loop").onclick = () => openSheet("LOOP LENGTH", (body) => {
+  const locked = song.takes.length > 0;
+  const g = el("div", "grid3");
+  for (const n of [4, 8, 16]) g.appendChild(optBtn(`${n} BARS`, song.bars === n, () => {
+    if (locked) return;
+    commit();
+    const old = song.bars;
+    song.bars = n;
+    song.chords = extendChords(song.chords.slice(0, old), n);
+    const m = song.parts.melody;
+    if (m.edited || m.locked) {
+      const steps = old * 16;
+      const out = [];
+      for (let off = 0; off < n * 16; off += steps) for (const x of m.notes) if (x.step + off < n * 16) out.push({ ...x, step: x.step + off });
+      m.notes = out;
+    } else build("melody", song, vibe());
+    changed();
+    closeSheet();
+  }, `${Math.round((n * 4 * 60) / song.bpm)} s`));
+  body.append(g, el("p", "hint block", locked ? "Locked: your vocal takes are this long. Delete them to change length." : "Longer loops repeat the progression and write a longer melody."));
+});
+$("st-taste").onclick = () => openSheet("YOUR TASTE", (body) => {
+  body.appendChild(el("p", "hint block", `Learned from <b style="color:var(--cyan)">${taste.count}</b> keeps and kills. Variations are ranked by it; one WILD card per batch ignores it so you don't get stuck in a rut.`));
+  for (const p of PARTS) {
+    const m = taste[p];
+    const strength = Math.min(1, m.w.reduce((a, w) => a + Math.abs(w), 0) / 6);
+    body.appendChild(el("div", "tastebar", `<span>${LABELS[p]}</span><i><b style="width:${Math.round(strength * 100)}%"></b></i>`));
+  }
+  let armed = false;
+  const reset = optBtn("RESET TASTE", false, () => {
+    if (!armed) { armed = true; reset.innerHTML = "TAP AGAIN TO FORGET"; return; }
+    taste = newTaste();
+    saveTaste();
+    for (const k in varCache) delete varCache[k];
+    renderTracks();
+    closeSheet();
+    toast("Taste forgotten");
+  });
+  body.appendChild(reset);
+});
+
+function openChordSheet(bar) {
+  openSheet(`BAR ${bar + 1} CHORD`, (body) => {
+    const g = el("div", "grid4");
+    const opts = [...new Set([song.chords[bar], ...SWAP_OPTIONS[song.mode]])];
+    for (const n of opts) {
+      const c = parseNumeral(n, song.root);
+      g.appendChild(optBtn(c.name, n === song.chords[bar], () => {
+        commit();
+        song.chords[bar] = n;
+        rebuildFollowers();
+        changed();
+        engine.auditionChord(bar);
+        closeSheet();
+      }, n));
+    }
+    body.appendChild(g);
+    body.appendChild(optBtn("NEW PROGRESSION FOR ALL BARS", false, () => { newProgression(); closeSheet(); }));
+  });
+}
+
+$("menuBtn").onclick = () => openSheet("SONG", async (body) => {
+  const name = el("input", "text");
+  name.type = "text"; name.maxLength = 40; name.placeholder = "untitled rot"; name.value = song.name || ""; name.id = "songName"; name.setAttribute("aria-label", "Song name");
+  name.oninput = () => { song.name = name.value; $("songTitle").textContent = (song.name || "UNTITLED ROT").toUpperCase(); light(); };
+  const r1 = el("div", "grid3");
+  r1.append(
+    optBtn("SAVE", false, async () => {
+      if (!song.name) { song.name = "rot " + new Date().toLocaleDateString(); name.value = song.name; }
+      song.savedId ||= "s" + Date.now().toString(36);
+      await saveSong(song.savedId);
+      await saveSong("current");
+      toast("Saved " + song.name);
+      closeSheet();
+    }),
+    optBtn("SHARE", false, () => { closeSheet(); exportSong(true); }),
+    optBtn("WAV", false, () => { closeSheet(); exportSong(false); })
+  );
+  let armed = false;
+  const fresh = optBtn("NEW SONG", false, () => {
+    if (!armed) { armed = true; fresh.innerHTML = "TAP AGAIN: START FRESH"; return; }
+    engine.stop();
+    history.length = 0;
+    song = newSong(song.vibe, song.bars);
+    for (const k in varCache) delete varCache[k];
+    changed();
+    closeSheet();
+    toast("Fresh song");
+  });
+  body.append(name, r1, fresh);
+  body.appendChild(el("div", "label", "<span>LEVELS</span>"));
+  for (const [k, lab] of [["drums", "DRUMS"], ["bass", "808"], ["chords", "CHORDS"], ["melody", "MELODY"], ["vox", "VOICE"]]) {
+    const f = el("label", "fader", `<span>${lab}</span>`);
+    const r = el("input");
+    r.type = "range"; r.min = 0; r.max = k === "vox" ? 2 : 1.5; r.step = 0.01; r.value = song.mix[k]; r.setAttribute("aria-label", lab + " level");
+    r.oninput = () => { song.mix[k] = Number(r.value); light(); };
+    f.appendChild(r);
+    body.appendChild(f);
+  }
+  body.appendChild(el("div", "label", "<span>SAVED ON THIS PHONE</span>"));
+  let all = [];
+  try { all = await store("readonly", (s) => s.getAll()); } catch (e) { /* none */ }
+  const list = (all || []).filter((s) => s.id !== "current" && s.v === 3).sort((a, b) => b.updated - a.updated);
+  if (!list.length) body.appendChild(el("p", "empty", "Nothing saved yet. Name it and hit SAVE."));
+  for (const s of list) {
+    const row = el("div", "songrow", `<div class="si"><b></b><span></span></div>`);
+    row.querySelector("b").textContent = s.name || "untitled rot";
+    row.querySelector("span").textContent = `${vibeById(s.vibe).name} · ${s.bpm} BPM · ${s.bars} BARS · ${(s.takes || []).length} TAKES`;
+    const load = el("button", "mini solid", "LOAD");
+    load.type = "button";
+    load.onclick = async () => { engine.stop(); await loadSong(s.id); closeSheet(); toast("Loaded " + (s.name || "song")); };
+    const del = el("button", "mini danger", "DELETE");
+    del.type = "button";
+    let a2 = false;
+    del.onclick = async () => {
+      if (!a2) { a2 = true; del.textContent = "SURE?"; return; }
+      await store("readwrite", (st) => st.delete(s.id));
+      row.remove();
+    };
+    row.append(load, del);
+    body.appendChild(row);
   }
 });
-engine.on("play", () => renderTransport());
+
+// ---------- transport ----------
+$("play").onclick = async () => {
+  if (recording) return;
+  if (engine.playing) engine.stop();
+  else await engine.start();
+  renderTransport();
+};
+$("rec").onclick = doRecord;
+$("undo").onclick = undo;
+$("export").onclick = () => exportSong(true);
+$("mutate").onclick = () => {
+  commit();
+  song.gen++;
+  let n = 0;
+  for (const p of PARTS) {
+    if (song.parts[p].locked) continue;
+    const best = variations(p, song, vibe(), taste, { drift, pool: 20, show: 1 })[0];
+    applyGenome(p, best.part);
+    n++;
+    const lane = $("lanes").querySelector(`[data-part="${p}"]`);
+    if (lane && !reduced) { lane.classList.remove("mutating"); void lane.offsetWidth; lane.classList.add("mutating"); }
+  }
+  for (const k in varCache) delete varCache[k];
+  buzz([10, 20, 10, 20, 10]);
+  toast(n ? `Generation ${song.gen} · ${n} part${n > 1 ? "s" : ""} evolved` : "Everything's locked");
+  changed();
+};
+for (const b of $("recMode").children) {
+  b.onclick = () => {
+    if (recording) return;
+    recMode = b.dataset.mode;
+    renderTracks();
+  };
+}
+
+// tap vs hold
+function bindHold(node, onTap, onHold) {
+  let timer = null;
+  let held = false;
+  let sx = 0;
+  let sy = 0;
+  node.addEventListener("pointerdown", (e) => {
+    held = false;
+    sx = e.clientX;
+    sy = e.clientY;
+    timer = setTimeout(() => { held = true; timer = null; onHold(); }, 450);
+  });
+  node.addEventListener("pointermove", (e) => {
+    if (timer && Math.hypot(e.clientX - sx, e.clientY - sy) > 10) { clearTimeout(timer); timer = null; }
+  });
+  node.addEventListener("pointerup", () => {
+    if (timer) { clearTimeout(timer); timer = null; if (!held) onTap(); }
+  });
+  node.addEventListener("pointercancel", () => { clearTimeout(timer); timer = null; });
+  node.addEventListener("contextmenu", (e) => e.preventDefault());
+}
+
+// ---------- engine events ----------
+engine.on("play", renderTransport);
+engine.on("step", (st, hits) => {
+  curStep = st;
+  if (st < 0) return;
+  for (const h of hits) {
+    flashLane(h.part);
+    if (h.part === "drums" && h.row === "kick") {
+      $("led").classList.add("hit");
+      setTimeout(() => $("led").classList.remove("hit"), 70);
+    }
+  }
+  // chord row "now" marker
+  const bar = Math.floor(st / 16);
+  const cells = $("chordRow").querySelector(".cells");
+  if (cells) for (let i = 0; i < cells.children.length; i++) cells.children[i].classList.toggle("now", i === bar);
+  // part editor: current column + pings
+  if (curPart && !$("s-part").hidden) {
+    const ed = $("editor");
+    const s = st % 16;
+    const show = curPart !== "melody" || bar === curBar;
+    for (const row of ed.querySelectorAll(".erow")) {
+      const cs = row.querySelectorAll(".cell");
+      cs.forEach((c, i) => c.classList.toggle("now", show && i === s));
+      if (show && hits.some((h) => h.part === curPart && (!h.row || h.row === row.dataset.row))) {
+        const c = cs[s];
+        if (c && c.classList.contains("on")) {
+          c.classList.add("ping");
+          setTimeout(() => c.classList.remove("ping"), 90);
+        }
+      }
+    }
+  }
+});
 engine.on("count", (n) => {
   const c = $("count");
   if (n > 0) {
     c.hidden = false;
     c.textContent = n;
+    c.style.color = recMode === "melody" ? COLORS.melody : "";
     c.classList.remove("pop");
     void c.offsetWidth;
     c.classList.add("pop");
     buzz(15);
   } else {
-    c.textContent = "SING";
-    setTimeout(() => { c.hidden = true; }, 500);
+    c.textContent = recMode === "melody" ? "PLAY" : "SING";
+    setTimeout(() => { c.hidden = true; }, 450);
   }
 });
-let micLevel = 0;
 let levelTick = 0;
-const pitchBuf = new Float32Array(8192);
-engine.on("level", (lvl, data) => {
-  micLevel = lvl;
+engine.on("level", (lvl) => {
+  if ((levelTick = (levelTick + 1) % 2)) return;
   document.documentElement.style.setProperty("--lvl", Math.min(1, lvl * 6).toFixed(3));
-  if (!recording || !engine.playing) return;
-  if ((levelTick = (levelTick + 1) % 2)) return; // live pitch every other chunk is plenty
-  pitchBuf.copyWithin(0, data.length);
-  pitchBuf.set(data, pitchBuf.length - data.length);
-  const tr = detectPitch(pitchBuf, engine.ctx.sampleRate);
-  for (let k = tr.f0.length - 1; k >= 0; k--) {
-    if (tr.voiced[k]) {
-      const pos = engine.position();
-      if (pos !== null) livePitch.push({ pos: pos / LOOP_STEPS, midi: 69 + 12 * Math.log2(tr.f0[k] / 440) });
-      break;
-    }
-  }
 });
-
-// ---------- visuals ----------
-const stat = $("static");
-const sctx = stat.getContext("2d", { alpha: true });
-const scope = $("scope");
-const scx = scope.getContext("2d");
-const trace = $("trace");
-const tcx = trace.getContext("2d");
-let kickFlash = 0;
-let tearUntil = 0;
-let lastStatic = 0;
-let img = null;
-
-function fit(c) {
-  const r = c.getBoundingClientRect();
-  const dpr = Math.min(2, devicePixelRatio || 1);
-  const w = Math.max(1, Math.round(r.width * dpr));
-  const h = Math.max(1, Math.round(r.height * dpr));
-  if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
-  return [w, h, dpr];
+const flashTimers = {};
+function flashLane(p) {
+  const lane = $("lanes").querySelector(`[data-part="${p}"]`);
+  if (!lane || $("s-tracks").classList.contains("under")) return;
+  lane.classList.add("hit");
+  clearTimeout(flashTimers[p]);
+  flashTimers[p] = setTimeout(() => lane.classList.remove("hit"), 60);
 }
-function fitStatic() {
-  const w = Math.ceil(innerWidth / 3);
-  const h = Math.ceil(innerHeight / 3);
-  if (stat.width !== w || stat.height !== h) {
-    stat.width = w;
-    stat.height = h;
-    img = sctx.createImageData(w, h);
+
+// ---------- drawing ----------
+let laneDirty = true;
+let curStep = -1;
+const laneCache = {};
+function drawLaneStatic(p, w, h) {
+  const off = laneCache[p] || (laneCache[p] = document.createElement("canvas"));
+  off.width = w;
+  off.height = h;
+  const x = off.getContext("2d");
+  const bars = song.bars;
+  const bw = w / bars;
+  const col = COLORS[p];
+  const pad = 2;
+  for (let b = 0; b < bars; b++) {
+    x.fillStyle = "#0f120f";
+    x.fillRect(b * bw + pad / 2, 0, bw - pad, h);
   }
-}
-
-const tdata = new Float32Array(2048);
-function outLevel() {
-  if (!engine.analyser) return 0;
-  engine.analyser.getFloatTimeDomainData(tdata);
-  let s = 0;
-  for (let i = 0; i < tdata.length; i += 8) s += tdata[i] * tdata[i];
-  return Math.sqrt(s / (tdata.length / 8));
-}
-
-function drawStatic(now, level) {
-  fitStatic();
-  const d = img.data;
-  const base = (engine.playing ? 0.16 : 0.1) + Math.min(0.5, level * 1.2) + kickFlash * 0.12 + (recording ? 0.08 : 0);
-  for (let i = 0; i < d.length; i += 4) {
-    const v = Math.random() * 255 * base;
-    d[i] = v * 0.62;
-    d[i + 1] = v;
-    d[i + 2] = v * 0.55;
-    d[i + 3] = 255;
-  }
-  sctx.putImageData(img, 0, 0);
-  if (now < tearUntil) {
-    for (let k = 0; k < 4; k++) {
-      const y = Math.floor(Math.random() * stat.height);
-      const h = 2 + Math.floor(Math.random() * 10);
-      const dx = Math.floor((Math.random() - 0.5) * 40);
-      sctx.drawImage(stat, 0, y, stat.width, h, dx, y, stat.width, h);
+  x.fillStyle = col;
+  const sw = bw / 16;
+  if (p === "drums") {
+    const d = song.parts.drums.pattern;
+    for (let b = 0; b < bars; b++) for (let s = 0; s < 16; s++) {
+      const X = b * bw + s * sw + 1;
+      if (d.kick[s]) x.fillRect(X, h * 0.62, Math.max(1, sw - 1.5), h * 0.32);
+      if (d.clap[s]) x.fillRect(X, h * 0.3, Math.max(1, sw - 1.5), h * 0.26);
+      if (d.hat[s]) { x.globalAlpha = 0.65; x.fillRect(X, h * 0.06, Math.max(1, sw - 1.5), h * (0.08 + d.hat[s] * 0.035)); x.globalAlpha = 1; }
     }
-  }
-}
-
-function drawScope(level) {
-  const [w, h, dpr] = fit(scope);
-  scx.clearRect(0, 0, w, h);
-  const mid = h / 2;
-  const has = !!engine.analyser;
-  const draw = (color, dx, alpha, lw) => {
-    scx.globalAlpha = alpha;
-    scx.strokeStyle = color;
-    scx.lineWidth = lw * dpr;
-    scx.beginPath();
-    const N = 256;
-    for (let i = 0; i < N; i++) {
-      const x = (i / (N - 1)) * w + dx * dpr;
-      const s = has ? tdata[Math.floor((i / N) * tdata.length)] : 0;
-      const jitter = (Math.random() - 0.5) * (has && engine.playing ? 0.02 : 0.06);
-      const y = mid + (s * 1.6 + jitter) * mid;
-      if (i === 0) scx.moveTo(x, y);
-      else scx.lineTo(x, y);
+  } else if (p === "bass") {
+    const d = song.parts.bass.pattern;
+    for (let b = 0; b < bars; b++) for (let s = 0; s < 16; s++) {
+      if (!d.rhythm[s]) continue;
+      let len = 1;
+      while (s + len < 16 && !d.rhythm[s + len]) len++;
+      x.fillRect(b * bw + s * sw + 1, d.oct[s] ? h * 0.2 : h * 0.55, len * sw - 2, h * 0.24);
     }
-    scx.stroke();
-  };
-  const phos = getVar("--phos");
-  draw(getVar("--blood"), -2 - level * 6, 0.5, 1.5);
-  draw(getVar("--ice"), 2 + level * 6, 0.5, 1.5);
-  draw(phos, 0, 0.25, 6); // cheap glow: wide faint stroke under the line (shadowBlur is slow on Android)
-  draw(phos, 0, 1, 2);
-  scx.globalAlpha = 1;
-}
-
-function drawTrace() {
-  const [w, h, dpr] = fit(trace);
-  tcx.clearRect(0, 0, w, h);
-  const phos = getVar("--phos");
-  const dim = getVar("--line");
-  // grid: one line per bar
-  tcx.strokeStyle = dim;
-  tcx.lineWidth = 1;
-  for (let b = 1; b < 4; b++) {
-    const x = (b / 4) * w;
-    tcx.beginPath();
-    tcx.moveTo(x, 0);
-    tcx.lineTo(x, h);
-    tcx.stroke();
-  }
-  const pcs = scalePitchClasses(song.root, song.mode);
-  const pts = [];
-  if (recording) {
-    for (const p of livePitch) pts.push(p);
-  } else {
-    const tk = song.takes.find((t) => t.id === lastTakeId) || song.takes[song.takes.length - 1];
-    if (tk && tk.track) {
-      const tr = tk.track;
-      const start = (REC_MARGIN + tk.lat + tk.nudge / 1000) * tk.sr;
-      const loopLen = (60 / song.bpm / 4) * LOOP_STEPS * tk.sr;
-      for (let k = 0; k < tr.f0.length; k += 2) {
-        if (!tr.voiced[k]) continue;
-        const n = tr.offset + k * tr.hop;
-        const pos = (n - start) / loopLen;
-        if (pos < 0 || pos > 1) continue;
-        pts.push({ pos, midi: 69 + 12 * Math.log2(tr.f0[k] / 440) });
+  } else if (p === "chords") {
+    const d = song.parts.chords.pattern;
+    for (let b = 0; b < bars; b++) for (let s = 0; s < 16; s++) {
+      if (!d.rhythm[s]) continue;
+      let len = 1;
+      while (s + len < 16 && !d.rhythm[s + len]) len++;
+      const L = d.style === "stabs" ? Math.min(len, 2) : d.style === "arp" ? 1 : len;
+      x.globalAlpha = 0.8;
+      for (let k = 0; k < 3; k++) x.fillRect(b * bw + s * sw + 1, h * (0.14 + k * 0.26), L * sw - 2, h * 0.18);
+      x.globalAlpha = 1;
+    }
+  } else if (p === "melody") {
+    const ns = song.parts.melody.notes;
+    const lo = Math.min(0, ...ns.map((n) => n.deg));
+    const hi = Math.max(9, ...ns.map((n) => n.deg));
+    for (const n of ns) {
+      const y = h - ((n.deg - lo + 1) / (hi - lo + 2)) * h;
+      x.fillRect(n.step * sw + 1, y - 2, Math.max(2, n.len * sw - 2), 5);
+    }
+  } else if (p === "voice") {
+    const tks = song.takes.filter((t) => t.on && t.peaks);
+    if (!tks.length) {
+      x.fillStyle = "#3a1218";
+      x.font = `${Math.round(h * 0.2)}px "JetBrains Mono", monospace`;
+      x.fillText("· · ·", 8, h * 0.6);
+    } else {
+      const N = 256;
+      for (let i = 0; i < N; i++) {
+        let m = 0;
+        for (const t of tks) m = Math.max(m, t.peaks[i]);
+        const hh = Math.max(1, m * h * 0.9);
+        x.fillRect((i / N) * w, (h - hh) / 2, Math.max(1, w / N - 0.6), hh);
       }
     }
   }
-  if (pts.length) {
-    let lo = Infinity;
-    let hi = -Infinity;
-    for (const p of pts) { lo = Math.min(lo, p.midi); hi = Math.max(hi, p.midi); }
-    lo -= 2;
-    hi += 2;
-    if (hi - lo < 10) { const c = (hi + lo) / 2; lo = c - 5; hi = c + 5; }
-    const Y = (m) => h - ((m - lo) / (hi - lo)) * h;
-    // raw: faint dots
-    tcx.fillStyle = getVar("--ghost");
-    tcx.globalAlpha = 0.35;
-    for (const p of pts) tcx.fillRect(p.pos * w, Y(p.midi), 2 * dpr, 2 * dpr);
-    tcx.globalAlpha = 1;
-    // snapped: bright steps
-    if (song.fx.tune !== "off") {
-      tcx.strokeStyle = phos;
-      tcx.lineWidth = 2.5 * dpr;
-      tcx.beginPath();
-      let prev = null;
-      for (const p of pts) {
-        const s = snapToScale(p.midi, pcs);
-        const x = p.pos * w;
-        if (prev && x - prev.x < 12 * dpr) {
-          tcx.lineTo(x, Y(prev.s));
-          tcx.lineTo(x, Y(s));
-        } else tcx.moveTo(x, Y(s));
-        prev = { x, s };
-      }
-      tcx.stroke();
-    }
-  } else {
-    tcx.fillStyle = getVar("--dim");
-    tcx.font = `${12 * dpr}px "Space Mono", monospace`;
-    tcx.fillText(recording ? "SING..." : "YOUR PITCH SHOWS UP HERE", 10 * dpr, h / 2 + 4 * dpr);
-  }
-  // playhead
+  return off;
+}
+function drawLanes() {
+  const lanes = $("lanes").children;
   const pos = engine.position();
-  if (pos !== null) {
-    const x = (pos / LOOP_STEPS) * w;
-    tcx.fillStyle = recording ? getVar("--blood") : phos;
-    tcx.fillRect(x, 0, 2 * dpr, h);
+  const steps = 16 * song.bars;
+  for (const lane of lanes) {
+    const cv = lane.querySelector("canvas");
+    const dpr = Math.min(2, devicePixelRatio || 1);
+    const w = Math.round(cv.clientWidth * dpr);
+    const h = Math.round(cv.clientHeight * dpr);
+    if (!w || !h) continue;
+    if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; laneDirty = true; }
+    const p = lane.dataset.part;
+    if (laneDirty || !laneCache[p] || laneCache[p].width !== w) drawLaneStatic(p, w, h);
+    const x = cv.getContext("2d");
+    x.clearRect(0, 0, w, h);
+    x.drawImage(laneCache[p], 0, 0);
+    if (pos !== null) {
+      const px = (pos / steps) * w;
+      x.fillStyle = "rgba(255,255,255,0.08)";
+      x.fillRect(px - 14 * dpr, 0, 14 * dpr, h);
+      x.fillStyle = "#fff";
+      x.fillRect(px, 0, 2 * dpr, h);
+    }
   }
+  laneDirty = false;
 }
-
-const varCache = {};
-function getVar(n) {
-  return (varCache[n] ||= getComputedStyle(document.documentElement).getPropertyValue(n).trim());
+const tdata = new Float32Array(1024);
+function drawScope() {
+  const cv = $("scope");
+  const dpr = Math.min(2, devicePixelRatio || 1);
+  const w = Math.round(cv.clientWidth * dpr);
+  const h = Math.round(cv.clientHeight * dpr);
+  if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+  const x = cv.getContext("2d");
+  x.clearRect(0, 0, w, h);
+  if (engine.analyser) engine.analyser.getFloatTimeDomainData(tdata);
+  else tdata.fill(0);
+  x.strokeStyle = "#1c1f1c";
+  x.lineWidth = 1;
+  x.beginPath();
+  x.moveTo(0, h / 2);
+  x.lineTo(w, h / 2);
+  x.stroke();
+  const line = (color, width, alpha) => {
+    x.strokeStyle = color;
+    x.globalAlpha = alpha;
+    x.lineWidth = width * dpr;
+    x.beginPath();
+    for (let i = 0; i < 200; i++) {
+      const v = tdata[Math.floor((i / 200) * tdata.length)];
+      const X = (i / 199) * w;
+      const Y = h / 2 + v * h * 0.9;
+      if (i) x.lineTo(X, Y);
+      else x.moveTo(X, Y);
+    }
+    x.stroke();
+  };
+  line(recording ? COLORS.voice : "#f2f5f2", 5, 0.12);
+  line(recording ? COLORS.voice : "#f2f5f2", 1.5, 0.9);
+  x.globalAlpha = 1;
 }
-
-function glitch(big) {
-  if (reduced) return;
-  const l = $("logo");
-  l.classList.remove("hit", "big");
-  void l.offsetWidth;
-  l.classList.add("hit");
-  if (big) l.classList.add("big");
-  tearUntil = performance.now() + (big ? 220 : 110);
-}
-
-function frame(now) {
-  const level = outLevel();
-  if (now - lastStatic > (reduced ? 250 : 40)) {
-    drawStatic(now, level);
-    lastStatic = now;
+function frame() {
+  if (!$("s-tracks").classList.contains("under")) {
+    drawScope();
+    drawLanes();
   }
-  drawScope(level);
-  if (!$("p-make").hidden) drawTrace();
-  kickFlash *= 0.85;
-  document.documentElement.style.setProperty("--kick", kickFlash.toFixed(3));
   requestAnimationFrame(frame);
 }
 
@@ -788,14 +1482,14 @@ function toast(msg) {
   t.textContent = msg;
   t.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { t.hidden = true; }, 2600);
+  toastTimer = setTimeout(() => { t.hidden = true; }, 2400);
 }
 
 // ---------- export ----------
 async function exportSong(viaShare) {
-  toast("Rendering...");
+  toast("Rendering…");
   try {
-    const blob = await renderWav(song, 4);
+    const blob = await renderWav(song, song.bars >= 8 ? 2 : 4);
     const name = (song.name || "voxrot").replace(/[^\w-]+/g, "_") + ".wav";
     const file = new File([blob], name, { type: "audio/wav" });
     if (viaShare && navigator.canShare && navigator.canShare({ files: [file] })) {
@@ -816,12 +1510,18 @@ async function exportSong(viaShare) {
     toast("Export failed: " + (e.message || e));
   }
 }
-$("share").onclick = () => exportSong(true);
-$("download").onclick = () => exportSong(false);
 
-// ---------- storage (IndexedDB, this phone only) ----------
+// ---------- storage ----------
 function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
 function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* storage off */ } }
+function loadTaste() {
+  try {
+    const t = JSON.parse(lsGet("voxrot.taste"));
+    if (t && t.drums) return t;
+  } catch (e) { /* fresh */ }
+  return newTaste();
+}
+function saveTaste() { lsSet("voxrot.taste", JSON.stringify(taste)); }
 
 let dbp = null;
 function db() {
@@ -856,88 +1556,26 @@ async function saveSong(id) {
 }
 async function loadSong(id) {
   const rec = await store("readonly", (s) => s.get(id));
-  if (!rec) return false;
-  const base = newSong(rec.vibe);
-  song = { ...base, ...rec, id: "current", mix: { ...DEFAULT_MIX, ...rec.mix }, fx: { ...base.fx, ...rec.fx } };
-  song.takes = (rec.takes || []).map((t) => ({ ...t, raw: t.raw instanceof Float32Array ? t.raw : new Float32Array(t.raw) }));
-  engine.setSong(song);
-  render();
+  if (!rec || rec.v !== 3) return false;
+  const { id: _id, updated, ...rest } = rec;
+  song = { ...newSong(rec.vibe, rec.bars), ...rest, mix: { ...DEFAULT_MIX, ...rec.mix } };
+  song.takes = (rec.takes || []).map((t) => {
+    const tk = { ...t, raw: t.raw instanceof Float32Array ? t.raw : new Float32Array(t.raw) };
+    takeStore.set(tk.id, tk);
+    return tk;
+  });
+  history.length = 0;
+  for (const k in varCache) delete varCache[k];
+  changed();
   await reprocessAll();
   return true;
 }
-async function renderSongs() {
-  let all = [];
-  try { all = await store("readonly", (s) => s.getAll()); } catch (e) { /* none */ }
-  const list = (all || []).filter((s) => s.id !== "current").sort((a, b) => b.updated - a.updated);
-  const box = $("songs");
-  if (!list.length) {
-    box.innerHTML = `<p class="empty">Nothing saved yet. Name the song and hit SAVE.</p>`;
-    return;
-  }
-  box.replaceChildren(
-    ...list.map((s) => {
-      const row = document.createElement("div");
-      row.className = "song";
-      const d = new Date(s.updated);
-      row.innerHTML = `<div class="song-info"><b></b><span class="dimtxt small"></span></div>
-        <button type="button" class="mini solid">LOAD</button><button type="button" class="mini danger">DELETE</button>`;
-      row.querySelector("b").textContent = s.name || "untitled rot";
-      row.querySelector("span").textContent = `${vibeById(s.vibe).name} · ${s.bpm} BPM · ${(s.takes || []).length} takes · ${d.toLocaleDateString()}`;
-      const [load, del] = row.querySelectorAll("button");
-      load.onclick = async () => {
-        engine.stop();
-        await loadSong(s.id);
-        toast("Loaded " + (s.name || "song"));
-        showTab("make");
-      };
-      let armed = false;
-      del.onclick = async () => {
-        if (!armed) {
-          armed = true;
-          del.textContent = "SURE?";
-          setTimeout(() => { armed = false; del.textContent = "DELETE"; }, 2500);
-          return;
-        }
-        await store("readwrite", (st) => st.delete(s.id));
-        renderSongs();
-      };
-      return row;
-    })
-  );
-}
-$("save").onclick = async () => {
-  if (!song.name) {
-    song.name = "rot " + new Date().toLocaleDateString();
-    $("songName").value = song.name;
-  }
-  const id = song.savedId || "s" + Date.now().toString(36);
-  song.savedId = id;
-  await saveSong(id);
-  await saveSong("current");
-  toast("Saved " + song.name);
-  renderSongs();
-};
-let newArmed = false;
-$("newSong").onclick = () => {
-  const b = $("newSong");
-  if (!newArmed) {
-    newArmed = true;
-    b.textContent = "SURE? TAP AGAIN";
-    setTimeout(() => { newArmed = false; b.textContent = "NEW SONG"; }, 2500);
-    return;
-  }
-  engine.stop();
-  song = newSong(song.vibe);
-  changed();
-  showTab("make");
-  toast("Fresh song");
-};
 
 // ---------- boot ----------
 async function boot() {
+  song = newSong(pick(VIBES).id);
   engine.setSong(song);
-  render();
-  showTab(lsGet("voxrot.tab") || "make");
+  renderTracks();
   try { await loadSong("current"); } catch (e) { /* first run */ }
   requestAnimationFrame(frame);
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});

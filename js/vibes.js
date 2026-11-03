@@ -19,6 +19,7 @@
 // lead:          what the keyboard plays: "saw" | "pluck" | "square"
 // ------------------------------------------------------------
 
+// genes: starting positions of each part's 4 dials (see gen.js GENE_NAMES)
 // swing: 0 = straight, 0.15 = every second 16th pushed late (UK garage / bassline feel)
 // bass.glide: 808 slides into the next note (rage)
 // Sources for each preset's choices are noted next to it.
@@ -27,6 +28,7 @@ export const VIBES = [
   {
     // krushclub: bouncy Jersey club kick, bitcrushed synths and vocals, very short songs
     id: "crush",
+    genes: { drums: [0.6, 0.8, 0, 0.6], bass: [0.4, 0.75, 0.2, 0.3], chords: [0.3, 0.9, 0.6, 0.9], melody: [0.5, 0.5, 0.4, 0.6] },
     name: "CRUSH CLUB",
     bpm: 150,
     swing: 0,
@@ -48,6 +50,7 @@ export const VIBES = [
   {
     // UK bassline: straight 4x4 at 135-142, claps on 2 and 4, swung hats, reese/sub bass ducked to the kick
     id: "screamo",
+    genes: { drums: [0.55, 0.6, 0.47, 0.5], bass: [0.7, 0.8, 0.1, 0.5], chords: [0.4, 0.7, 0.5, 0.4], melody: [0.45, 0.5, 0.5, 0.5] },
     name: "SCREAMO BASS",
     bpm: 138,
     swing: 0.14,
@@ -69,6 +72,7 @@ export const VIBES = [
   {
     // digicore: trap drums with rolling hats, dreamy plucks and pads, heavy autotune, pitched ad-libs
     id: "digi",
+    genes: { drums: [0.5, 0.35, 0.13, 0.4], bass: [0.3, 0.4, 0.6, 0.2], chords: [0.6, 0.6, 0.4, 0.6], melody: [0.55, 0.6, 0.4, 0.7] },
     name: "DIGI ACHE",
     bpm: 150,
     swing: 0.04,
@@ -91,6 +95,7 @@ export const VIBES = [
     // rage: 130-150 (140 common), one minor vamp, short supersaw stabs + quiet octave-down,
     // snare on beat 3, open hat before downbeats, long clipped 808 with slides
     id: "rage",
+    genes: { drums: [0.75, 0.85, 0, 0.6], bass: [0.4, 0.95, 0.8, 0.4], chords: [0.5, 1.0, 0.8, 0.3], melody: [0.35, 0.3, 0.7, 0.6] },
     name: "RAGE",
     bpm: 140,
     swing: 0,
@@ -112,6 +117,7 @@ export const VIBES = [
   {
     // bubblegum-maximalist hyperpop: fast, major, chip squares, chipmunk vocals
     id: "glitter",
+    genes: { drums: [0.5, 0.6, 0, 0.7], bass: [0.6, 0.5, 0.1, 0.6], chords: [0.6, 0.8, 0.5, 0.4], melody: [0.6, 0.7, 0.5, 0.8] },
     name: "GLITTER GORE",
     bpm: 175,
     swing: 0,
