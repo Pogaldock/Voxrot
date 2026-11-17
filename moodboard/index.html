@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>Moodboard</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon-192.png">
+<style>
+:root{--bg:#fff;--fg:#000;--mut:#888;--line:#ddd;--dim:rgba(0,0,0,.55)}
+@media (prefers-color-scheme:dark){:root{--bg:#000;--fg:#fff;--mut:#777;--line:#2a2a2a;--dim:rgba(0,0,0,.75)}}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.4 system-ui,sans-serif}
+button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer}
+[hidden]{display:none!important}
+header{position:sticky;top:0;z-index:2;background:var(--bg);padding:calc(env(safe-area-inset-top) + 10px) 12px 8px;display:flex;align-items:center;gap:10px}
+#title{font-size:18px;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#count{color:var(--mut);font-size:13px}
+#more{width:36px;height:36px;font-size:20px;line-height:36px;text-align:center}
+.strip{display:flex;gap:6px;overflow-x:auto;scrollbar-width:none;padding:0 12px 10px}
+.strip::-webkit-scrollbar{display:none}
+.chip{flex:none;height:32px;padding:0 13px;border:1px solid var(--line);border-radius:16px;font-size:14px;white-space:nowrap;user-select:none;-webkit-user-select:none}
+.chip.on{background:var(--fg);color:var(--bg);border-color:var(--fg)}
+.chip.add{border-style:dashed;color:var(--mut)}
+#grid{columns:2;column-gap:4px;padding:0 4px calc(env(safe-area-inset-bottom) + 20px)}
+@media (min-width:700px){#grid{columns:4}}
+#grid img{width:100%;display:block;margin:0 0 4px;border-radius:4px;break-inside:avoid;background:var(--line);min-height:40px}
+.empty{color:var(--mut);padding:40px 24px;text-align:center;font-size:14px}
+.layer{position:fixed;inset:0;z-index:10;background:var(--dim);display:flex;flex-direction:column;justify-content:flex-end}
+.panel{background:var(--bg);border-radius:14px 14px 0 0;padding:14px 0 calc(env(safe-area-inset-bottom) + 14px)}
+.panel .row{padding:0 14px}
+#sheetImgs{display:flex;gap:6px;padding:0 14px 12px}
+#sheetImgs img{height:140px;max-width:100%;object-fit:contain;border-radius:6px;background:var(--line)}
+.label{color:var(--mut);font-size:13px;padding:0 14px 8px;display:flex;justify-content:space-between}
+#bar{height:2px;background:var(--fg);margin:12px 14px 0;transform-origin:left}
+#bar.run{animation:shrink 1.5s linear forwards}
+@keyframes shrink{from{transform:scaleX(1)}to{transform:scaleX(0)}}
+#viewer{background:#000;justify-content:center}
+#viewer img{max-width:100%;max-height:80vh;object-fit:contain;margin:auto}
+#viewer .acts{display:flex;justify-content:space-around;padding:14px 0 calc(env(safe-area-inset-bottom) + 14px);color:#fff}
+#viewer .acts button{padding:8px 14px}
+#viewer .strip .chip{color:#fff;border-color:#444}
+.menu button{display:block;width:100%;text-align:left;padding:14px 18px;font-size:16px}
+.menu button.warn{color:#d33}
+#toast{position:fixed;left:50%;bottom:calc(env(safe-area-inset-bottom) + 24px);transform:translateX(-50%);background:var(--fg);color:var(--bg);padding:8px 14px;border-radius:16px;font-size:14px;z-index:20}
+#install{margin:0 12px 10px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;font-size:13px;display:flex;gap:10px;align-items:center}
+#install span{flex:1;color:var(--mut)}
+#install button{border:1px solid var(--fg);border-radius:14px;padding:4px 12px}
+</style>
+</head>
+<body>
+
+<header>
+  <div id="title">Moodboard</div>
+  <div id="count"></div>
+  <button id="more" aria-label="Board options">&#8943;</button>
+</header>
+<div id="install" hidden><span>Install it so it shows up in the share menu.</span><button id="installBtn" hidden>Install</button></div>
+<nav class="strip" id="strip"></nav>
+<main id="grid"></main>
+<div class="empty" id="empty" hidden>Empty board.<br><br>In Chrome on Google Images: tap an image so the big preview opens, long-press it, choose <b>Share image</b>, then <b>Moodboard</b>.</div>
+
+<!-- Save sheet (opens after a share) -->
+<div class="layer" id="sheet" hidden>
+  <div class="panel" id="sheetPanel">
+    <div id="sheetImgs"></div>
+    <div class="label"><span id="sheetMsg">Saved to</span><button id="discard">Discard</button></div>
+    <div class="strip" id="sheetStrip"></div>
+    <div class="label" style="padding-top:2px;padding-bottom:0">Tap: this image only. Hold: switch session.</div>
+    <div id="bar"></div>
+  </div>
+</div>
+
+<!-- Full image viewer -->
+<div class="layer" id="viewer" hidden>
+  <img id="viewImg" alt="">
+  <div class="strip" id="moveStrip" hidden></div>
+  <div class="acts">
+    <button id="vSource">Source</button>
+    <button id="vMove">Move</button>
+    <button id="vDelete">Delete</button>
+    <button id="vClose">Close</button>
+  </div>
+</div>
+
+<!-- Board menu -->
+<div class="layer" id="menu" hidden>
+  <div class="panel menu">
+    <button data-a="new">New board</button>
+    <button data-a="rename">Rename board</button>
+    <button data-a="export">Export board as zip</button>
+    <button data-a="delete" class="warn">Delete board</button>
+  </div>
+</div>
+
+<div id="toast" hidden></div>
+
+<script src="db.js"></script>
+<script>
+var $ = function (s) { return document.querySelector(s); };
+var objUrls = [];
+var current = null;      // board being viewed (= active board)
+var viewing = null;      // item open in viewer
+
+function src(it) {
+  if (it.blob) { var u = URL.createObjectURL(it.blob); objUrls.push(u); return u; }
+  return it.url;
+}
+function freeUrls() { objUrls.forEach(URL.revokeObjectURL); objUrls = []; }
+function img(it) {
+  var i = document.createElement('img');
+  i.src = src(it); i.loading = 'lazy'; i.referrerPolicy = 'no-referrer'; i.alt = '';
+  return i;
+}
+function toast(msg) {
+  var t = $('#toast'); t.textContent = msg; t.hidden = false;
+  clearTimeout(toast.h); toast.h = setTimeout(function () { t.hidden = true; }, 1600);
+}
+function byCreated(list) { return list.slice().sort(function (a, b) { return (a.c || a.t) - (b.c || b.t); }); }
+
+// Chip with tap + long-press
+function chip(text, cls, onTap, onHold) {
+  var b = document.createElement('button');
+  b.className = 'chip ' + (cls || ''); b.textContent = text;
+  var timer, held = false;
+  b.addEventListener('pointerdown', function () {
+    held = false;
+    if (onHold) timer = setTimeout(function () { held = true; if (navigator.vibrate) navigator.vibrate(15); onHold(); }, 450);
+  });
+  ['pointerup', 'pointerleave', 'pointercancel'].forEach(function (ev) { b.addEventListener(ev, function () { clearTimeout(timer); }); });
+  b.addEventListener('click', function () { if (!held) onTap(); });
+  b.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+  return b;
+}
+
+async function render() {
+  freeUrls();
+  current = await MB.active();
+  var boards = byCreated(await MB.boards());
+  var board = boards.find(function (b) { return b.id === current; });
+  $('#title').textContent = board ? board.name : 'Moodboard';
+
+  var strip = $('#strip'); strip.innerHTML = '';
+  boards.forEach(function (b) {
+    strip.appendChild(chip(b.name, b.id === current ? 'on' : '', async function () { await MB.setActive(b.id); render(); }));
+  });
+  strip.appendChild(chip('+', 'add', newBoard));
+  var on = strip.querySelector('.on'); if (on) on.scrollIntoView({ inline: 'nearest', block: 'nearest' });
+
+  var items = await MB.byBoard(current);
+  $('#count').textContent = items.length || '';
+  var grid = $('#grid'); grid.innerHTML = '';
+  items.forEach(function (it) {
+    var i = img(it);
+    i.onclick = function () { openViewer(it); };
+    grid.appendChild(i);
+  });
+  $('#empty').hidden = items.length > 0;
+}
+
+async function newBoard() {
+  var name = (prompt('Board name') || '').trim();
+  if (!name) return null;
+  var b = await MB.newBoard(name);
+  await MB.setActive(b.id);
+  render();
+  return b;
+}
+
+// ---------- Save sheet ----------
+var sheetIds = [], sheetTimer = null, sheetBoard = null;
+
+async function openSheet(ids) {
+  sheetIds = ids;
+  var items = (await Promise.all(ids.map(function (id) { return MB.get('items', id); }))).filter(Boolean);
+  if (!items.length) { finishSheet(); return; }
+  sheetBoard = items[0].board;
+  var box = $('#sheetImgs'); box.innerHTML = '';
+  items.slice(0, 3).forEach(function (it) { box.appendChild(img(it)); });
+  $('#sheetMsg').textContent = items.length > 1 ? items.length + ' saved to' : 'Saved to';
+  await drawSheetChips();
+  $('#sheet').hidden = false;
+  var bar = $('#bar'); bar.classList.remove('run'); void bar.offsetWidth; bar.classList.add('run');
+  sheetTimer = setTimeout(finishSheet, 1500);
+}
+
+async function drawSheetChips() {
+  var boards = await MB.boards(); // most recently used first
+  var s = $('#sheetStrip'); s.innerHTML = '';
+  boards.forEach(function (b) {
+    s.appendChild(chip(b.name, b.id === sheetBoard ? 'on' : '',
+      async function () { await moveSheet(b.id, false); },
+      async function () { await moveSheet(b.id, true); }));
+  });
+  s.appendChild(chip('+ new', 'add', async function () {
+    var name = (prompt('New board') || '').trim();
+    if (!name) return;
+    var b = await MB.newBoard(name);
+    await moveSheet(b.id, true);
+  }));
+}
+
+async function moveSheet(boardId, makeActive) {
+  await MB.move(sheetIds, boardId);
+  if (makeActive) await MB.setActive(boardId);
+  sheetBoard = boardId;
+  await drawSheetChips();
+  var b = await MB.get('boards', boardId);
+  $('#sheetMsg').textContent = makeActive ? 'Session now: ' + b.name : 'Moved to ' + b.name;
+  setTimeout(finishSheet, 700);
+}
+
+function finishSheet() {
+  clearTimeout(sheetTimer);
+  if ($('#sheet').hidden && !sheetIds.length) return;
+  $('#sheet').hidden = true; sheetIds = [];
+  history.replaceState(null, '', location.pathname);
+  try { window.close(); } catch (e) {}
+  render();
+}
+
+// Any touch on the sheet stops the auto-close so you have time to pick.
+$('#sheetPanel').addEventListener('pointerdown', function () {
+  clearTimeout(sheetTimer); $('#bar').classList.remove('run'); $('#bar').style.transform = 'scaleX(0)';
+});
+$('#discard').onclick = async function () {
+  for (var i = 0; i < sheetIds.length; i++) await MB.del('items', sheetIds[i]);
+  toast('Discarded'); finishSheet();
+};
+
+// ---------- Viewer ----------
+function openViewer(it) {
+  viewing = it;
+  $('#viewImg').src = src(it);
+  $('#vSource').hidden = !it.src;
+  $('#moveStrip').hidden = true;
+  $('#viewer').hidden = false;
+}
+function closeViewer() { $('#viewer').hidden = true; viewing = null; }
+$('#vClose').onclick = closeViewer;
+$('#viewImg').onclick = closeViewer;
+$('#vSource').onclick = function () { if (viewing && viewing.src) window.open(viewing.src, '_blank'); };
+$('#vDelete').onclick = async function () {
+  await MB.del('items', viewing.id); closeViewer(); toast('Deleted'); render();
+};
+$('#vMove').onclick = async function () {
+  var s = $('#moveStrip'); s.innerHTML = '';
+  (await MB.boards()).forEach(function (b) {
+    if (b.id === viewing.board) return;
+    s.appendChild(chip(b.name, '', async function () {
+      await MB.move([viewing.id], b.id); closeViewer(); toast('Moved to ' + b.name); render();
+    }));
+  });
+  s.hidden = !s.children.length;
+  if (!s.children.length) toast('No other boards yet');
+};
+
+// ---------- Board menu ----------
+$('#more').onclick = function () { $('#menu').hidden = false; };
+$('#menu').onclick = async function (e) {
+  var a = e.target.dataset && e.target.dataset.a;
+  $('#menu').hidden = true;
+  if (!a) return;
+  var board = await MB.get('boards', current);
+  if (a === 'new') newBoard();
+  if (a === 'rename') {
+    var n = (prompt('Rename board', board.name) || '').trim();
+    if (n) { board.name = n; await MB.put('boards', board); render(); }
+  }
+  if (a === 'delete') {
+    var items = await MB.byBoard(current);
+    if (!confirm('Delete "' + board.name + '" and its ' + items.length + ' images?')) return;
+    for (var i = 0; i < items.length; i++) await MB.del('items', items[i].id);
+    await MB.del('boards', current);
+    await MB.del('meta', 'active');
+    render();
+  }
+  if (a === 'export') exportZip(board);
+};
+
+// ---------- Zip export (no compression, no libraries) ----------
+var CRC = (function () {
+  var t = new Uint32Array(256);
+  for (var n = 0; n < 256; n++) { var c = n; for (var k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; }
+  return t;
+})();
+function crc32(d) { var c = 0xFFFFFFFF; for (var i = 0; i < d.length; i++) c = CRC[(c ^ d[i]) & 255] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; }
+
+function makeZip(files) {
+  var enc = new TextEncoder(), parts = [], central = [], off = 0;
+  files.forEach(function (f) {
+    var name = enc.encode(f.name), crc = crc32(f.data), size = f.data.length;
+    var h = new DataView(new ArrayBuffer(30));
+    h.setUint32(0, 0x04034b50, true); h.setUint16(4, 20, true); h.setUint16(12, 33, true);
+    h.setUint32(14, crc, true); h.setUint32(18, size, true); h.setUint32(22, size, true); h.setUint16(26, name.length, true);
+    parts.push(h.buffer, name, f.data);
+    var c = new DataView(new ArrayBuffer(46));
+    c.setUint32(0, 0x02014b50, true); c.setUint16(4, 20, true); c.setUint16(6, 20, true); c.setUint16(14, 33, true);
+    c.setUint32(16, crc, true); c.setUint32(20, size, true); c.setUint32(24, size, true); c.setUint16(28, name.length, true);
+    c.setUint32(42, off, true);
+    central.push(c.buffer, name);
+    off += 30 + name.length + size;
+  });
+  var cdSize = central.reduce(function (s, p) { return s + (p.byteLength || p.length); }, 0);
+  var e = new DataView(new ArrayBuffer(22));
+  e.setUint32(0, 0x06054b50, true); e.setUint16(8, files.length, true); e.setUint16(10, files.length, true);
+  e.setUint32(12, cdSize, true); e.setUint32(16, off, true);
+  return new Blob(parts.concat(central, [e.buffer]), { type: 'application/zip' });
+}
+
+async function exportZip(board) {
+  var items = (await MB.byBoard(board.id)).reverse(), files = [], links = [];
+  for (var i = 0; i < items.length; i++) {
+    var it = items[i], num = String(i + 1).padStart(3, '0');
+    if (it.blob) {
+      var ext = ((it.blob.type || 'image/jpeg').split('/')[1] || 'jpg').replace('jpeg', 'jpg').replace('+xml', '');
+      files.push({ name: num + '.' + ext, data: new Uint8Array(await it.blob.arrayBuffer()) });
+    } else links.push(num + '  ' + it.url);
+    if (it.src) links.push(num + '  source: ' + it.src);
+  }
+  if (links.length) files.push({ name: 'links.txt', data: new TextEncoder().encode(links.join('\n')) });
+  if (!files.length) { toast('Nothing to export'); return; }
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(makeZip(files));
+  a.download = board.name.replace(/[^\w\- ]+/g, '').trim() + '.zip';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(function () { URL.revokeObjectURL(a.href); }, 5000);
+}
+
+// ---------- Install + service worker ----------
+var installEvt = null;
+var standalone = matchMedia('(display-mode: standalone)').matches;
+if (!standalone) $('#install').hidden = false;
+if (!standalone) $('#install span').textContent = 'Install it so it shows up in the share menu: Chrome menu, then Add to home screen.';
+addEventListener('beforeinstallprompt', function (e) {
+  e.preventDefault(); installEvt = e;
+  $('#install span').textContent = 'Install it so it shows up in the share menu.';
+  $('#installBtn').hidden = false;
+});
+$('#installBtn').onclick = async function () {
+  if (!installEvt) return;
+  installEvt.prompt(); await installEvt.userChoice; installEvt = null; $('#install').hidden = true;
+};
+addEventListener('appinstalled', function () { $('#install').hidden = true; });
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
+
+// Close overlays with the Android back gesture is not wired; Close/tap does it.
+(async function start() {
+  var q = new URLSearchParams(location.search);
+  await render();
+  if (q.get('error')) { toast("Couldn't read that share"); history.replaceState(null, '', location.pathname); }
+  var saved = (q.get('saved') || '').split(',').filter(Boolean);
+  if (saved.length) openSheet(saved);
+})();
+</script>
+</body>
+</html>
