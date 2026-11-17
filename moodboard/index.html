@@ -59,7 +59,7 @@ header{position:sticky;top:0;z-index:2;background:var(--bg);padding:calc(env(saf
 <div id="install" hidden><span>Install it so it shows up in the share menu.</span><button id="installBtn" hidden>Install</button></div>
 <nav class="strip" id="strip"></nav>
 <main id="grid"></main>
-<div class="empty" id="empty" hidden>Empty board.<br><br>In Chrome on Google Images: tap an image so the big preview opens, long-press it, choose <b>Share image</b>, then <b>Moodboard</b>.</div>
+<div class="empty" id="empty" hidden>Empty board.<br><br>Firefox: double tap images on Google Images.<br>Chrome: open an image, long-press it, <b>Share image</b>, <b>Moodboard</b>.</div>
 
 <!-- Save sheet (opens after a share) -->
 <div class="layer" id="sheet" hidden>
@@ -90,6 +90,7 @@ header{position:sticky;top:0;z-index:2;background:var(--bg);padding:calc(env(saf
     <button data-a="new">New board</button>
     <button data-a="rename">Rename board</button>
     <button data-a="export">Export board as zip</button>
+    <button data-a="debug" id="debugBtn" hidden>Copy Google debug log</button>
     <button data-a="delete" class="warn">Delete board</button>
   </div>
 </div>
@@ -157,6 +158,7 @@ async function render() {
     grid.appendChild(i);
   });
   $('#empty').hidden = items.length > 0;
+  hello();
 }
 
 async function newBoard() {
@@ -277,7 +279,54 @@ $('#menu').onclick = async function (e) {
     render();
   }
   if (a === 'export') exportZip(board);
+  if (a === 'debug') bridgeSend({ type: 'debug?' });
 };
+
+// ---------- Bridge to the Google double-tap userscript (Firefox + Violentmonkey) ----------
+// The userscript keeps a queue of images saved on Google and hands it over here.
+var BP = 'mbx:', importing = false;
+function bridgeSend(o) { window.postMessage(BP + JSON.stringify(o), '*'); }
+async function hello() {
+  var boards = await MB.boards();
+  bridgeSend({ type: 'hello', state: {
+    boards: boards.map(function (b) { return { id: b.id, name: b.name }; }),
+    active: await MB.active(),
+    activeT: (await MB.get('meta', 'activeT')) || 0
+  } });
+}
+addEventListener('message', async function (e) {
+  if (e.source !== window || typeof e.data !== 'string' || e.data.indexOf(BP) !== 0) return;
+  var m = JSON.parse(e.data.slice(BP.length));
+  if (m.type === 'ready') { $('#debugBtn').hidden = false; $('#install').hidden = true; hello(); }
+  if (m.type === 'debug') {
+    try { await navigator.clipboard.writeText(m.text); toast('Debug log copied'); }
+    catch (err) { prompt('Copy this', m.text); }
+  }
+  if (m.type === 'import' && !importing) {
+    importing = true;
+    try {
+      var now = Date.now(), boardIds = [], ids = [];
+      for (var i = 0; i < m.boards.length; i++) {
+        var b = m.boards[i];
+        if (!(await MB.get('boards', b.id))) await MB.put('boards', { id: b.id, name: b.name, t: now, c: now + i });
+        boardIds.push(b.id);
+      }
+      if (m.active && (await MB.get('boards', m.active))) await MB.setActive(m.active, m.activeT);
+      var fallback = await MB.active();
+      for (var j = 0; j < m.items.length; j++) {
+        var q = m.items[j];
+        var blob = q.data ? await (await fetch(q.data)).blob() : null;
+        var board = (await MB.get('boards', q.board)) ? q.board : fallback;
+        await MB.put('items', { id: q.id, board: board, blob: blob || undefined, url: blob ? undefined : q.url, src: q.src, t: q.t });
+        await MB.touch(board);
+        ids.push(q.id);
+      }
+      bridgeSend({ type: 'imported', ids: ids, boardIds: boardIds });
+      if (ids.length) toast(ids.length + ' from Google');
+    } finally { importing = false; }
+    render();
+  }
+});
 
 // ---------- Zip export (no compression, no libraries) ----------
 var CRC = (function () {

@@ -55,7 +55,11 @@ var MB = (function () {
       }
       return a;
     },
-    setActive: async function (id) { await api.put('meta', id, 'active'); await api.touch(id); },
+    setActive: async function (id, when) {
+      await api.put('meta', id, 'active');
+      await api.put('meta', when || Date.now(), 'activeT');
+      await api.touch(id);
+    },
     move: async function (ids, board) {
       for (var i = 0; i < ids.length; i++) {
         var it = await api.get('items', ids[i]);
