@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name         Moodboard: double tap to save
 // @namespace    symbioze.moodboard
-// @version      1.0.0
+// @version      1.1.0
 // @description  Double tap an image on Google Images to save it to your Moodboard.
 // @match        https://pogaldock.github.io/Voxrot/moodboard/*
 // @include      /^https:\/\/(www|images)\.google\.[a-z.]+\/.*/
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_xmlhttpRequest
+// @grant        GM_addValueChangeListener
 // @connect      *
 // @run-at       document-end
 // @noframes
@@ -39,7 +40,8 @@
     function send(o) { window.postMessage(P + JSON.stringify(o), '*'); }
 
     window.addEventListener('message', function (e) {
-      if (e.source !== window || typeof e.data !== 'string' || e.data.indexOf(P) !== 0) return;
+      // No e.source check: in Firefox's add-on sandbox it can fail silently. The prefix + message types are enough.
+      if (typeof e.data !== 'string' || e.data.indexOf(P) !== 0) return;
       var m = JSON.parse(e.data.slice(P.length));
 
       if (m.type === 'hello') {
@@ -73,7 +75,14 @@
       if (m.type === 'debug?') send({ type: 'debug', text: JSON.stringify(get('debug', []), null, 1) });
     });
 
-    send({ type: 'ready' });
+    // A save on Google while this tab is open: ask the page for its state, which triggers the import.
+    if (typeof GM_addValueChangeListener === 'function') {
+      GM_addValueChangeListener('queue', function (name, oldV, newV, remote) {
+        if (remote && newV && newV.length) send({ type: 'ready', waiting: newV.length });
+      });
+    }
+
+    send({ type: 'ready', waiting: get('queue', []).length });
   }
 
   // ================= Google side =================

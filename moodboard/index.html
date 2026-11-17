@@ -57,6 +57,7 @@ header{position:sticky;top:0;z-index:2;background:var(--bg);padding:calc(env(saf
   <button id="more" aria-label="Board options">&#8943;</button>
 </header>
 <div id="install" hidden><span>Install it so it shows up in the share menu.</span><button id="installBtn" hidden>Install</button></div>
+<div id="link" hidden style="color:var(--mut);font-size:12px;padding:0 12px 8px"></div>
 <nav class="strip" id="strip"></nav>
 <main id="grid"></main>
 <div class="empty" id="empty" hidden>Empty board.<br><br>Firefox: double tap images on Google Images.<br>Chrome: open an image, long-press it, <b>Share image</b>, <b>Moodboard</b>.</div>
@@ -284,7 +285,16 @@ $('#menu').onclick = async function (e) {
 
 // ---------- Bridge to the Google double-tap userscript (Firefox + Violentmonkey) ----------
 // The userscript keeps a queue of images saved on Google and hands it over here.
-var BP = 'mbx:', importing = false;
+var BP = 'mbx:', importing = false, linked = false;
+function setLink(t) { var el = $('#link'); el.textContent = t; el.hidden = false; }
+// In Firefox the userscript should answer within a moment. If it doesn't, say so.
+if (/Firefox/.test(navigator.userAgent)) setTimeout(function () {
+  if (!linked) setLink('Google link off: Violentmonkey script not running on this page');
+}, 2500);
+// Coming back to an already-open Moodboard tab: collect anything saved meanwhile.
+document.addEventListener('visibilitychange', function () { if (!document.hidden) hello(); });
+addEventListener('pageshow', function () { hello(); });
+addEventListener('focus', function () { hello(); });
 function bridgeSend(o) { window.postMessage(BP + JSON.stringify(o), '*'); }
 async function hello() {
   var boards = await MB.boards();
@@ -295,9 +305,13 @@ async function hello() {
   } });
 }
 addEventListener('message', async function (e) {
-  if (e.source !== window || typeof e.data !== 'string' || e.data.indexOf(BP) !== 0) return;
+  if (typeof e.data !== 'string' || e.data.indexOf(BP) !== 0) return;
   var m = JSON.parse(e.data.slice(BP.length));
-  if (m.type === 'ready') { $('#debugBtn').hidden = false; $('#install').hidden = true; hello(); }
+  if (m.type === 'ready') {
+    linked = true; $('#debugBtn').hidden = false; $('#install').hidden = true;
+    setLink('Google link on' + (m.waiting ? ' · ' + m.waiting + ' waiting' : ''));
+    hello();
+  }
   if (m.type === 'debug') {
     try { await navigator.clipboard.writeText(m.text); toast('Debug log copied'); }
     catch (err) { prompt('Copy this', m.text); }
@@ -323,6 +337,7 @@ addEventListener('message', async function (e) {
       }
       bridgeSend({ type: 'imported', ids: ids, boardIds: boardIds });
       if (ids.length) toast(ids.length + ' from Google');
+      setLink('Google link on');
     } finally { importing = false; }
     render();
   }
