@@ -58,16 +58,7 @@ header{position:sticky;top:0;z-index:2;background:var(--bg);padding:calc(env(saf
 #sugg:empty,#bwords:empty{display:none}
 .chip.sug{border-style:dashed}
 .chip.word{background:var(--fg);color:var(--bg);border-color:var(--fg)}
-#results .panel{max-height:85vh;display:flex;flex-direction:column}
-#resGrid{flex:1;overflow-y:auto;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px;padding:0 6px}
-#resGrid div{position:relative;aspect-ratio:1;background:var(--line);border-radius:4px;overflow:hidden}
-#resGrid img{width:100%;height:100%;object-fit:cover;display:block}
-#resGrid div.sel{outline:3px solid var(--fg);outline-offset:-3px}
-#resGrid div.sel::after{content:'';position:absolute;right:6px;top:6px;width:14px;height:14px;border-radius:50%;background:var(--fg);border:2px solid var(--bg)}
-.resbar{display:flex;gap:10px;align-items:center;padding:10px 14px 0}
-.resbar .grow{flex:1;color:var(--mut);font-size:13px}
 .btn{height:36px;padding:0 16px;border:1px solid var(--fg);border-radius:18px}
-.btn.solid{background:var(--fg);color:var(--bg)}
 #canvas{position:fixed;left:0;right:0;bottom:0;overflow:hidden;touch-action:none;background:var(--bg)}
 #world{position:absolute;left:0;top:0;transform-origin:0 0}
 #world img{position:absolute;display:block;border-radius:3px;background:var(--line)}
@@ -137,16 +128,7 @@ header{position:sticky;top:0;z-index:2;background:var(--bg);padding:calc(env(saf
 <div id="dip" hidden>
   <div id="track"><div class="slide" style="left:-100%"><img alt=""></div><div class="slide" style="left:0"><img alt=""></div><div class="slide" style="left:100%"><img alt=""></div></div>
   <div id="dipScope" hidden><button class="chip" data-s="all">All boards</button><button class="chip" data-s="board">This board</button></div>
-  <div id="dipInfo" hidden><span class="grow" id="dipBoard"></span><button id="dipSource" style="color:#fff">Source</button><button id="dipClose" style="color:#fff">Close</button></div>
-</div>
-
-<!-- Google results for one word: tap to pick, then add -->
-<div class="layer" id="results" hidden>
-  <div class="panel">
-    <div class="label" style="padding-bottom:10px"><span id="resTitle"></span><button id="resAll">Select all</button></div>
-    <div id="resGrid"></div>
-    <div class="resbar"><span class="grow" id="resCount">Tap images to pick</span><button class="btn" id="resClose">Close</button><button class="btn solid" id="resAdd">Add</button></div>
-  </div>
+  <div id="dipInfo" hidden><span class="grow" id="dipBoard"></span><button id="dipSource" style="color:#fff">Source</button><button id="dipDelete" style="color:#fff">Delete</button><button id="dipClose" style="color:#fff">Close</button></div>
 </div>
 
 <div id="toast" hidden></div>
@@ -389,8 +371,7 @@ addEventListener('message', async function (e) {
     setLink('Google link on' + (m.waiting ? ' · ' + m.waiting + ' waiting' : ''));
     hello();
   }
-  if (m.type === 'results' && m.res && (!res || res.id !== m.res.id)) openResults(m.res);
-  if (m.type === 'progress') toast('Adding ' + m.done + '/' + m.total);
+  if (m.type === 'progress') toast(m.total ? '"' + m.word + '" ' + m.done + '/' + m.total : 'No results for "' + m.word + '"');
   if (m.type === 'debug') {
     try { await navigator.clipboard.writeText(m.text); toast('Debug log copied'); }
     catch (err) { prompt('Copy this', m.text); }
@@ -538,6 +519,15 @@ function closeDip(fromPop) {
 addEventListener('popstate', function () { closeDip(true); });
 $('#shuffleBtn').onclick = function () { openDip('all'); };
 $('#dipClose').onclick = function () { closeDip(); };
+$('#dipDelete').onclick = async function () {
+  var it = dipItem(0);
+  await MB.del('items', it.id);
+  var u = dip.urls[it.id]; if (u && u.indexOf('blob:') === 0) URL.revokeObjectURL(u); delete dip.urls[it.id];
+  dip.list.splice(((dip.i % dip.list.length) + dip.list.length) % dip.list.length, 1);
+  toast('Deleted');
+  if (!dip.list.length) { closeDip(); render(); return; }
+  dipDraw(); render();
+};
 $('#dipSource').onclick = function () { var it = dipItem(0); if (it.src) window.open(it.src, '_blank'); };
 document.querySelectorAll('#dipScope .chip').forEach(function (c) { c.onclick = function () { openDip(c.dataset.s); }; });
 addEventListener('keydown', function (e) {
@@ -606,8 +596,11 @@ async function makeThumbs(items) {
 // ---------- Theme words + live suggestions (Datamuse) ----------
 var suggTimer = null, suggCtl = null;
 function googleUrl(word) { return (window.__mbGoogle || 'https://www.google.com/search') + '?udm=2&q=' + encodeURIComponent(word); }
+// Adding a word fetches its images at once. The Google tab must open inside the tap itself
+// (browsers block tabs opened later), so grab() runs before anything async.
 async function addWord(w) {
   w = w.trim().toLowerCase(); if (!w) return;
+  grab(w);
   var b = await MB.get('boards', current);
   b.words = b.words || [];
   if (b.words.indexOf(w) < 0) { b.words.push(w); await MB.put('boards', b); }
@@ -653,46 +646,8 @@ $('#wordIn').addEventListener('keydown', function (e) { if (e.key === 'Enter') a
 function grab(word) {
   if (linked) bridgeSend({ type: 'grab', word: word, board: current });
   window.open(googleUrl(word), '_blank');
-  toast(linked ? 'Grabbing "' + word + '"…' : 'Opened Google. Double tap to save.');
+  toast(linked ? 'Getting images for "' + word + '"…' : 'Opened Google. Double tap to save.');
 }
-
-// ---------- Results picker ----------
-var res = null, picked = {};
-function openResults(r) {
-  res = r; picked = {};
-  $('#resTitle').textContent = r.word + ' · ' + r.items.length + ' results';
-  var g = $('#resGrid'); g.innerHTML = '';
-  r.items.forEach(function (it, i) {
-    var d = document.createElement('div');
-    var im = document.createElement('img'); im.src = it.thumb; im.referrerPolicy = 'no-referrer'; im.loading = 'lazy'; im.alt = it.title || '';
-    d.appendChild(im);
-    d.onclick = function () { picked[i] = !picked[i]; d.classList.toggle('sel', !!picked[i]); countPicked(); };
-    g.appendChild(d);
-  });
-  countPicked();
-  $('#results').hidden = false;
-}
-function countPicked() {
-  var n = Object.keys(picked).filter(function (k) { return picked[k]; }).length;
-  $('#resCount').textContent = n ? n + ' picked' : 'Tap images to pick';
-  $('#resAdd').textContent = n ? 'Add ' + n : 'Add';
-}
-function closeResults() { if (res) bridgeSend({ type: 'resultsSeen', id: res.id }); res = null; $('#results').hidden = true; }
-$('#resClose').onclick = closeResults;
-$('#resAll').onclick = function () {
-  var all = res && res.items.every(function (x, i) { return picked[i]; });
-  document.querySelectorAll('#resGrid div').forEach(function (d, i) { picked[i] = !all; d.classList.toggle('sel', !all); });
-  countPicked();
-};
-$('#resAdd').onclick = function () {
-  if (!res) return;
-  var list = res.items.filter(function (x, i) { return picked[i]; })
-    .map(function (x) { return { url: x.url, thumb: x.thumb, src: x.lpage || x.url, word: res.word, board: res.board }; });
-  if (!list.length) { toast('Pick some first'); return; }
-  bridgeSend({ type: 'fetchPicked', items: list });
-  toast('Adding ' + list.length + '…');
-  closeResults();
-};
 
 // ---------- Canvas: every image of the board, grouped by word; pinch to zoom, drag to pan ----------
 var canvasOn = false, cam = { x: 0, y: 0, s: 1 }, camFitted = false, canvasItems = [];

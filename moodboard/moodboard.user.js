@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Moodboard: double tap to save
 // @namespace    symbioze.moodboard
-// @version      1.2.0
+// @version      1.3.0
 // @description  Double tap an image on Google Images to save it to your Moodboard.
 // @match        https://pogaldock.github.io/Voxrot/moodboard/*
 // @include      /^https:\/\/(www|images)\.google\.[a-z.]+\/.*/
@@ -91,36 +91,52 @@
       if (m.type === 'debug?') send({ type: 'debug', text: JSON.stringify(get('debug', []), null, 1) });
 
       // Page asked for Google results for a word; the Google tab it opens picks this up.
-      if (m.type === 'grab') set('grabReq', { id: uid(), word: m.word, board: m.board, t: Date.now() });
-
-      if (m.type === 'resultsSeen') { var r = get('grabRes', null); if (r && r.id === m.id) set('grabRes', null); }
-
-      // Picked results: download the full images (falls back to the preview) and queue them for import.
-      if (m.type === 'fetchPicked') {
-        (async function () {
-          for (var i = 0; i < m.items.length; i++) {
-            var p = m.items[i];
-            var data = (p.url && await fetchBlob(p.url)) || await fetchBlob(p.thumb);
-            set('queue', get('queue', []).concat([{ id: uid(), board: p.board, word: p.word, data: data, url: data ? null : (p.url || p.thumb), src: p.src, t: Date.now() }]));
-            send({ type: 'progress', done: i + 1, total: m.items.length });
-          }
-          send({ type: 'ready' });
-        })();
+      if (m.type === 'grab') {
+        var reqs = get('grabReqs', []).filter(function (r) { return Date.now() - r.t < 120000; });
+        reqs.push({ id: uid(), word: m.word, board: m.board, t: Date.now() });
+        set('grabReqs', reqs);
       }
     });
 
-    function sendResults() { var r = get('grabRes', null); if (r && r.items && r.items.length) send({ type: 'results', res: r }); }
+    // Results collected by a Google tab: download them here and queue them for import, no picking.
+    var PER_WORD = 16, fetching = false;
+    async function fetchResults() {
+      if (fetching) return; fetching = true;
+      try {
+        var list;
+        while ((list = get('grabRes', [])).length) {
+          var r = list[0];
+          // Remove by id from a fresh read: another Google tab may have added results meanwhile.
+          set('grabRes', get('grabRes', []).filter(function (x) { return x.id !== r.id; }));
+          var saved = get('saved', {});
+          var full = r.items.filter(function (x) { return x.url && !saved[x.url]; });
+          var pick = full.length >= 8 ? full.slice(0, PER_WORD)
+            : full.concat(r.items.filter(function (x) { return !x.url && !saved[x.thumb.slice(0, 300)]; })).slice(0, PER_WORD);
+          send({ type: 'progress', word: r.word, done: 0, total: pick.length });
+          for (var i = 0; i < pick.length; i++) {
+            var p = pick[i];
+            var data = (p.url && await fetchBlob(p.url)) || await fetchBlob(p.thumb);
+            var key = p.url || p.thumb.slice(0, 300);
+            saved = get('saved', {}); saved[key] = 1; set('saved', saved);
+            set('queue', get('queue', []).concat([{ id: uid(), board: r.board, word: r.word, data: data, url: data ? null : (p.url || p.thumb), src: p.lpage || p.url, t: Date.now() + i }]));
+            send({ type: 'progress', word: r.word, done: i + 1, total: pick.length });
+            if ((i + 1) % 4 === 0) send({ type: 'ready' });
+          }
+          send({ type: 'ready' });
+        }
+      } finally { fetching = false; }
+    }
 
     // A save on Google while this tab is open: ask the page for its state, which triggers the import.
     if (typeof GM_addValueChangeListener === 'function') {
       GM_addValueChangeListener('queue', function (name, oldV, newV, remote) {
         if (remote && newV && newV.length) send({ type: 'ready', waiting: newV.length });
       });
-      GM_addValueChangeListener('grabRes', function (name, oldV, newV, remote) { if (remote) sendResults(); });
+      GM_addValueChangeListener('grabRes', function (name, oldV, newV, remote) { if (remote) fetchResults(); });
     }
 
     send({ type: 'ready', waiting: get('queue', []).length });
-    sendResults();
+    fetchResults();
   }
 
   // ================= Google side =================
@@ -356,11 +372,11 @@
 
     // ---------- grab mode: Moodboard opened this tab to collect results for one word ----------
     function grabMode() {
-      var req = get('grabReq', null);
-      if (!req || Date.now() - req.t > 120000) return;
       var q = (new URLSearchParams(location.search).get('q') || '').trim().toLowerCase();
-      if (q !== String(req.word).trim().toLowerCase()) return;
-      set('grabReq', null);
+      var reqs = get('grabReqs', []);
+      var req = reqs.find(function (r) { return Date.now() - r.t < 120000 && String(r.word).trim().toLowerCase() === q; });
+      if (!req) return;
+      set('grabReqs', get('grabReqs', []).filter(function (r) { return r.id !== req.id; }));
       drawPill('grabbing "' + req.word + '"');
       var tries = 0, lastN = -1;
       var timer = setInterval(function () {
@@ -387,7 +403,7 @@
         if (!thumb || seen[key]) continue; seen[key] = 1;
         out.push({ thumb: thumb, url: url, lpage: t.getAttribute('data-lpage'), title: im.alt || '' });
       }
-      set('grabRes', { id: uid(), word: req.word, board: req.board, items: out, t: Date.now() });
+      set('grabRes', get('grabRes', []).concat([{ id: uid(), word: req.word, board: req.board, items: out, t: Date.now() }]));
       var log = get('debug', []);
       log.unshift({ t: new Date().toISOString(), how: 'grab', word: req.word, tiles: tiles.length, sent: out.length, full: out.filter(function (x) { return x.url; }).length });
       set('debug', log.slice(0, 8));
