@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Moodboard: double tap to save
 // @namespace    symbioze.moodboard
-// @version      1.3.0
+// @version      1.4.0
 // @description  Double tap an image on Google Images to save it to your Moodboard.
 // @match        https://pogaldock.github.io/Voxrot/moodboard/*
 // @include      /^https:\/\/(www|images)\.google\.[a-z.]+\/.*/
@@ -90,6 +90,9 @@
 
       if (m.type === 'debug?') send({ type: 'debug', text: JSON.stringify(get('debug', []), null, 1) });
 
+      // Page opened Google Lens for "Find similar": the Lens tab switches itself to Visual matches.
+      if (m.type === 'lens') set('lensReq', { board: m.board, t: Date.now() });
+
       // Page asked for Google results for a word; the Google tab it opens picks this up.
       if (m.type === 'grab') {
         var reqs = get('grabReqs', []).filter(function (r) { return Date.now() - r.t < 120000; });
@@ -141,8 +144,18 @@
 
   // ================= Google side =================
   function google() {
+    function isLens() { return /[?&]vsrid=/.test(location.search); }
     function isImages() {
-      return /[?&](udm=2|tbm=isch)(&|$)/.test(location.search) || /^images\./.test(HOST) || window.__mbHost;
+      return /[?&](udm=2|tbm=isch)(&|$)/.test(location.search) || isLens() || /^images\./.test(HOST) || window.__mbHost;
+    }
+
+    // Lens opened from Moodboard's "Similar" button: jump to the Visual matches tab (udm=44), a plain image feed.
+    var lr = get('lensReq', null);
+    if (isLens() && lr && Date.now() - lr.t < 90000 && !/[?&]udm=44(&|$)/.test(location.search)) {
+      set('lensReq', null);
+      var lu = new URL(location.href); lu.searchParams.set('udm', '44');
+      location.replace(lu.href);
+      return;
     }
 
     // Stop double-tap zoom so two taps arrive as two clicks.
@@ -428,7 +441,7 @@
 
       var board = active();
       var q = (new URLSearchParams(location.search).get('q') || '').trim().toLowerCase();
-      var item = { id: uid(), board: board, word: q || undefined, data: data, url: data ? null : (found ? found.url : thumb), src: sourcePage(img) || (found && found.url) || null, t: Date.now() };
+      var item = { id: uid(), board: board, word: q || (isLens() ? 'similar' : undefined), data: data, url: data ? null : (found ? found.url : thumb), src: sourcePage(img) || (found && found.url) || null, t: Date.now() };
       set('queue', get('queue', []).concat([item]));
       saved[key] = 1; set('saved', saved);
       sessionCount++;

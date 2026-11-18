@@ -75,6 +75,7 @@ header{position:sticky;top:0;z-index:2;background:var(--bg);padding:calc(env(saf
   <div id="title">Moodboard</div>
   <div id="count"></div>
   <button id="viewBtn" style="font-size:14px;padding:6px 10px;border:1px solid var(--line);border-radius:14px">Canvas</button>
+  <button id="similarBtn" style="font-size:14px;padding:6px 10px;border:1px solid var(--line);border-radius:14px">Similar</button>
   <button id="shuffleBtn" style="font-size:14px;padding:6px 10px;border:1px solid var(--line);border-radius:14px">Shuffle</button>
   <button id="more" aria-label="Board options">&#8943;</button>
 </header>
@@ -106,6 +107,7 @@ header{position:sticky;top:0;z-index:2;background:var(--bg);padding:calc(env(saf
   <img id="viewImg" alt="">
   <div class="strip" id="moveStrip" hidden></div>
   <div class="acts">
+    <button id="vSimilar">Similar</button>
     <button id="vSource">Source</button>
     <button id="vMove">Move</button>
     <button id="vDelete">Delete</button>
@@ -128,7 +130,7 @@ header{position:sticky;top:0;z-index:2;background:var(--bg);padding:calc(env(saf
 <div id="dip" hidden>
   <div id="track"><div class="slide" style="left:-100%"><img alt=""></div><div class="slide" style="left:0"><img alt=""></div><div class="slide" style="left:100%"><img alt=""></div></div>
   <div id="dipScope" hidden><button class="chip" data-s="all">All boards</button><button class="chip" data-s="board">This board</button></div>
-  <div id="dipInfo" hidden><span class="grow" id="dipBoard"></span><button id="dipSource" style="color:#fff">Source</button><button id="dipDelete" style="color:#fff">Delete</button><button id="dipClose" style="color:#fff">Close</button></div>
+  <div id="dipInfo" hidden><span class="grow" id="dipBoard"></span><button id="dipSimilar" style="color:#fff">Similar</button><button id="dipSource" style="color:#fff">Source</button><button id="dipDelete" style="color:#fff">Delete</button><button id="dipClose" style="color:#fff">Close</button></div>
 </div>
 
 <div id="toast" hidden></div>
@@ -200,6 +202,7 @@ async function render() {
   var on = strip.querySelector('.on'); if (on) on.scrollIntoView({ inline: 'nearest', block: 'nearest' });
 
   var items = await MB.byBoard(current);
+  boardItems = items;
   $('#count').textContent = items.length || '';
   var grid = $('#grid'); grid.innerHTML = '';
   items.forEach(function (it) {
@@ -641,6 +644,33 @@ async function suggest() {
 }
 $('#wordIn').addEventListener('input', suggest);
 $('#wordIn').addEventListener('keydown', function (e) { if (e.key === 'Enter') addWord(this.value); });
+
+// ---------- Find similar: send one image to Google Lens, land on its "Visual matches" feed ----------
+// The upload is a normal form POST opened in a new tab, so it has to happen inside the tap (no awaits before submit).
+// In Firefox the userscript switches the Lens page to Visual matches and makes double tap save there too.
+var boardItems = [];
+function lensSearch(it) {
+  if (!it) { toast('No images on this board yet'); return; }
+  if (linked) bridgeSend({ type: 'lens', board: current });
+  var blob = it.blob && it.blob.size < 8e6 ? it.blob : (it.thumb || it.blob);
+  if (!blob) {
+    if (it.url) window.open('https://lens.google.com/uploadbyurl?url=' + encodeURIComponent(it.url), '_blank');
+    else toast('This image has no file to search with');
+    return;
+  }
+  var f = document.createElement('form');
+  f.method = 'POST'; f.enctype = 'multipart/form-data'; f.target = '_blank'; f.hidden = true;
+  f.action = (window.__mbLens || 'https://lens.google.com/v3/upload') + '?ep=ccm&s=&st=' + Date.now();
+  var inp = document.createElement('input'); inp.type = 'file'; inp.name = 'encoded_image';
+  var dt = new DataTransfer();
+  dt.items.add(new File([blob], 'image.jpg', { type: blob.type || 'image/jpeg' }));
+  inp.files = dt.files;
+  f.appendChild(inp); document.body.appendChild(f); f.submit(); f.remove();
+  toast(linked ? 'Similar images: double tap to save' : 'Opened Google Lens');
+}
+$('#similarBtn').onclick = function () { lensSearch(boardItems[Math.floor(Math.random() * boardItems.length)]); };
+$('#vSimilar').onclick = function () { lensSearch(viewing); };
+$('#dipSimilar').onclick = function () { lensSearch(dipItem(0)); };
 
 // Tap a word: open Google Images for it. With the Firefox script running, the results come back here to pick from.
 function grab(word) {
