@@ -42,6 +42,16 @@ header{position:sticky;top:0;z-index:2;background:var(--bg);padding:calc(env(saf
 #viewer .strip .chip{color:#fff;border-color:#444}
 .menu button{display:block;width:100%;text-align:left;padding:14px 18px;font-size:16px}
 .menu button.warn{color:#d33}
+#dip{position:fixed;inset:0;z-index:15;background:#000;overflow:hidden;touch-action:none;user-select:none;-webkit-user-select:none}
+#track{position:absolute;inset:0;will-change:transform}
+#track.anim{transition:transform .22s ease-out}
+.slide{position:absolute;top:0;width:100%;height:100%;display:flex;align-items:center;justify-content:center}
+.slide img{max-width:100%;max-height:100%;object-fit:contain;pointer-events:none}
+#dipInfo{position:absolute;left:0;right:0;bottom:0;padding:14px 16px calc(env(safe-area-inset-bottom) + 18px);display:flex;gap:16px;align-items:center;color:#fff;font-size:14px;background:rgba(0,0,0,.6)}
+#dipInfo .grow{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#dipScope{position:absolute;top:calc(env(safe-area-inset-top) + 12px);left:50%;transform:translateX(-50%);display:flex;gap:6px}
+#dipScope .chip{color:#fff;border-color:#444;background:rgba(0,0,0,.5)}
+#dipScope .chip.on{background:#fff;color:#000;border-color:#fff}
 #toast{position:fixed;left:50%;bottom:calc(env(safe-area-inset-bottom) + 24px);transform:translateX(-50%);background:var(--fg);color:var(--bg);padding:8px 14px;border-radius:16px;font-size:14px;z-index:20}
 #install{margin:0 12px 10px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;font-size:13px;display:flex;gap:10px;align-items:center}
 #install span{flex:1;color:var(--mut)}
@@ -53,6 +63,7 @@ header{position:sticky;top:0;z-index:2;background:var(--bg);padding:calc(env(saf
 <header>
   <div id="title">Moodboard</div>
   <div id="count"></div>
+  <button id="shuffleBtn" style="font-size:14px;padding:6px 10px;border:1px solid var(--line);border-radius:14px">Shuffle</button>
   <button id="more" aria-label="Board options">&#8943;</button>
 </header>
 <div id="install" hidden><span>Install it so it shows up in the share menu.</span><button id="installBtn" hidden>Install</button></div>
@@ -93,6 +104,13 @@ header{position:sticky;top:0;z-index:2;background:var(--bg);padding:calc(env(saf
     <button data-a="debug" id="debugBtn" hidden>Copy Google debug log</button>
     <button data-a="delete" class="warn">Delete board</button>
   </div>
+</div>
+
+<!-- Shuffle viewer: random images full screen, swipe left/right, swipe down or back to close -->
+<div id="dip" hidden>
+  <div id="track"><div class="slide" style="left:-100%"><img alt=""></div><div class="slide" style="left:0"><img alt=""></div><div class="slide" style="left:100%"><img alt=""></div></div>
+  <div id="dipScope" hidden><button class="chip" data-s="all">All boards</button><button class="chip" data-s="board">This board</button></div>
+  <div id="dipInfo" hidden><span class="grow" id="dipBoard"></span><button id="dipSource" style="color:#fff">Source</button><button id="dipClose" style="color:#fff">Close</button></div>
 </div>
 
 <div id="toast" hidden></div>
@@ -166,6 +184,7 @@ async function render() {
     grid.appendChild(i);
   });
   $('#empty').hidden = items.length > 0;
+  drawCtx();
   hello();
 }
 
@@ -293,7 +312,13 @@ $('#menu').onclick = async function (e) {
 // ---------- Bridge to the Google double-tap userscript (Firefox + Violentmonkey) ----------
 // The userscript keeps a queue of images saved on Google and hands it over here.
 var BP = 'mbx:', importing = false, linked = false;
-function setLink(t) { var el = $('#link'); el.textContent = t; el.hidden = false; }
+var linkText = '';
+function setLink(t) { linkText = t; drawCtx(); }
+async function drawCtx() {
+  var n = (await MB.all('items')).length;
+  var el = $('#link'); el.hidden = false;
+  el.textContent = contextLabel() + ' · ' + n + ' images saved here' + (linkText ? ' · ' + linkText : '');
+}
 // In Firefox the userscript should answer within a moment. If it doesn't, say so.
 if (/Firefox/.test(navigator.userAgent)) setTimeout(function () {
   if (!linked) setLink('Google link off: Violentmonkey script not running on this page');
@@ -402,7 +427,7 @@ async function exportZip(board) {
 // ---------- Install + service worker ----------
 var installEvt = null;
 var standalone = matchMedia('(display-mode: standalone)').matches;
-if (!standalone) $('#install').hidden = false;
+if (!standalone && !/Firefox/.test(navigator.userAgent)) $('#install').hidden = false;
 if (!standalone) $('#install span').textContent = 'Install it so it shows up in the share menu: Chrome menu, then Add to home screen.';
 addEventListener('beforeinstallprompt', function (e) {
   e.preventDefault(); installEvt = e;
@@ -417,12 +442,102 @@ addEventListener('appinstalled', function () { $('#install').hidden = true; });
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
 
 // Close overlays with the Android back gesture is not wired; Close/tap does it.
+// ---------- Shuffle viewer ----------
+var dip = { list: [], i: 0, urls: {}, scope: 'all', names: {} };
+function shuffle(a) { for (var i = a.length - 1; i > 0; i--) { var j = Math.floor(Math.random() * (i + 1)); var t = a[i]; a[i] = a[j]; a[j] = t; } return a; }
+function dipItem(k) { var n = dip.list.length; return dip.list[((dip.i + k) % n + n) % n]; }
+function dipUrl(it) {
+  if (!dip.urls[it.id]) dip.urls[it.id] = it.blob ? URL.createObjectURL(it.blob) : it.url;
+  return dip.urls[it.id];
+}
+function dipDraw() {
+  var keep = {};
+  var imgs = document.querySelectorAll('#track img');
+  [-1, 0, 1].forEach(function (k, n) { var it = dipItem(k); keep[it.id] = 1; imgs[n].src = dipUrl(it); });
+  dipItem(2) && (keep[dipItem(2).id] = 1, dipUrl(dipItem(2)));
+  Object.keys(dip.urls).forEach(function (id) {
+    if (!keep[id]) { if (dip.urls[id].indexOf('blob:') === 0) URL.revokeObjectURL(dip.urls[id]); delete dip.urls[id]; }
+  });
+  var cur = dipItem(0);
+  $('#dipBoard').textContent = (dip.names[cur.board] || '') + '  ' + (((dip.i % dip.list.length) + dip.list.length) % dip.list.length + 1) + '/' + dip.list.length;
+  $('#dipSource').hidden = !cur.src;
+  document.querySelectorAll('#dipScope .chip').forEach(function (c) { c.classList.toggle('on', c.dataset.s === dip.scope); });
+}
+async function openDip(scope) {
+  dip.scope = scope || dip.scope;
+  var items = dip.scope === 'board' ? await MB.byBoard(current) : await MB.all('items');
+  if (!items.length) { toast(dip.scope === 'board' ? 'This board is empty' : 'No images yet'); if (dip.scope === 'board') return openDip('all'); return; }
+  dip.names = {}; (await MB.boards()).forEach(function (b) { dip.names[b.id] = b.name; });
+  dip.list = shuffle(items); dip.i = 0;
+  if ($('#dip').hidden) { $('#dip').hidden = false; history.pushState({ dip: 1 }, ''); }
+  $('#dipInfo').hidden = $('#dipScope').hidden = true;
+  dipDraw();
+}
+function closeDip(fromPop) {
+  if ($('#dip').hidden) return;
+  $('#dip').hidden = true;
+  Object.keys(dip.urls).forEach(function (id) { if (dip.urls[id].indexOf('blob:') === 0) URL.revokeObjectURL(dip.urls[id]); });
+  dip.urls = {};
+  if (!fromPop && history.state && history.state.dip) history.back();
+}
+addEventListener('popstate', function () { closeDip(true); });
+$('#shuffleBtn').onclick = function () { openDip('all'); };
+$('#dipClose').onclick = function () { closeDip(); };
+$('#dipSource').onclick = function () { var it = dipItem(0); if (it.src) window.open(it.src, '_blank'); };
+document.querySelectorAll('#dipScope .chip').forEach(function (c) { c.onclick = function () { openDip(c.dataset.s); }; });
+addEventListener('keydown', function (e) {
+  if ($('#dip').hidden) return;
+  if (e.key === 'ArrowRight') dipStep(1); if (e.key === 'ArrowLeft') dipStep(-1); if (e.key === 'Escape') closeDip();
+});
+function dipStep(dir) {
+  var track = $('#track');
+  track.classList.add('anim'); track.style.transform = 'translateX(' + (-dir * 100) + '%)';
+  setTimeout(function () {
+    track.classList.remove('anim'); dip.i += dir; dipDraw(); track.style.transform = '';
+  }, 220);
+}
+(function () {
+  var el = $('#dip'), track = $('#track'), x0 = 0, y0 = 0, dx = 0, dy = 0, down = false;
+  el.addEventListener('pointerdown', function (e) {
+    if (e.target.closest('button')) return;
+    down = true; x0 = e.clientX; y0 = e.clientY; dx = dy = 0; track.classList.remove('anim');
+  });
+  el.addEventListener('pointermove', function (e) {
+    if (!down) return;
+    dx = e.clientX - x0; dy = e.clientY - y0;
+    if (Math.abs(dx) > Math.abs(dy)) track.style.transform = 'translateX(' + dx + 'px)';
+    else if (dy > 0) track.style.transform = 'translateY(' + dy + 'px)';
+  });
+  function up() {
+    if (!down) return; down = false;
+    var w = el.clientWidth;
+    if (Math.abs(dx) < 8 && Math.abs(dy) < 8) {          // tap: show/hide info
+      var show = $('#dipInfo').hidden; $('#dipInfo').hidden = $('#dipScope').hidden = !show; track.style.transform = ''; return;
+    }
+    if (dy > 120 && Math.abs(dy) > Math.abs(dx)) { track.style.transform = ''; closeDip(); return; }
+    if (Math.abs(dx) > Math.min(80, w * 0.2)) {
+      var dir = dx < 0 ? 1 : -1;
+      track.classList.add('anim'); track.style.transform = 'translateX(' + (-dir * w) + 'px)';
+      setTimeout(function () { track.classList.remove('anim'); dip.i += dir; dipDraw(); track.style.transform = ''; }, 220);
+    } else { track.classList.add('anim'); track.style.transform = ''; }
+  }
+  el.addEventListener('pointerup', up); el.addEventListener('pointercancel', up);
+})();
+
+// Where this page is running, so storage mix-ups are visible.
+function contextLabel() {
+  var app = matchMedia('(display-mode: standalone)').matches || matchMedia('(display-mode: minimal-ui)').matches;
+  var br = /Firefox/.test(navigator.userAgent) ? 'Firefox' : /SamsungBrowser/.test(navigator.userAgent) ? 'Samsung Internet' : 'Chrome';
+  return br + (app ? ' app' : ' tab');
+}
+
 (async function start() {
   var q = new URLSearchParams(location.search);
   await render();
   if (q.get('error')) { toast("Couldn't read that share"); history.replaceState(null, '', location.pathname); }
   var saved = (q.get('saved') || '').split(',').filter(Boolean);
   if (saved.length) openSheet(saved);
+  else if (q.has('dip')) openDip('all');
 })();
 </script>
 </body>

@@ -1,7 +1,7 @@
 {
   "name": "Moodboard",
   "short_name": "Moodboard",
-  "start_url": "./",
+  "start_url": "./?dip",
   "scope": "./",
   "display": "standalone",
   "background_color": "#000000",
