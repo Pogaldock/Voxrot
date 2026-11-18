@@ -1,7 +1,7 @@
 // Service worker: offline cache + receives images shared from Android's share menu.
 importScripts('db.js');
 
-var CACHE = 'mb-v4';
+var CACHE = 'mb-v5';
 var ASSETS = ['./', './index.html', './db.js', './manifest.json', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', function (e) {

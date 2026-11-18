@@ -52,6 +52,26 @@ header{position:sticky;top:0;z-index:2;background:var(--bg);padding:calc(env(saf
 #dipScope{position:absolute;top:calc(env(safe-area-inset-top) + 12px);left:50%;transform:translateX(-50%);display:flex;gap:6px}
 #dipScope .chip{color:#fff;border-color:#444;background:rgba(0,0,0,.5)}
 #dipScope .chip.on{background:#fff;color:#000;border-color:#fff}
+#words{padding:0 12px 10px}
+#wordIn{width:100%;height:36px;border:1px solid var(--line);border-radius:18px;background:transparent;color:var(--fg);padding:0 14px;font:inherit;outline:none}
+#sugg,#bwords{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+#sugg:empty,#bwords:empty{display:none}
+.chip.sug{border-style:dashed}
+.chip.word{background:var(--fg);color:var(--bg);border-color:var(--fg)}
+#results .panel{max-height:85vh;display:flex;flex-direction:column}
+#resGrid{flex:1;overflow-y:auto;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px;padding:0 6px}
+#resGrid div{position:relative;aspect-ratio:1;background:var(--line);border-radius:4px;overflow:hidden}
+#resGrid img{width:100%;height:100%;object-fit:cover;display:block}
+#resGrid div.sel{outline:3px solid var(--fg);outline-offset:-3px}
+#resGrid div.sel::after{content:'';position:absolute;right:6px;top:6px;width:14px;height:14px;border-radius:50%;background:var(--fg);border:2px solid var(--bg)}
+.resbar{display:flex;gap:10px;align-items:center;padding:10px 14px 0}
+.resbar .grow{flex:1;color:var(--mut);font-size:13px}
+.btn{height:36px;padding:0 16px;border:1px solid var(--fg);border-radius:18px}
+.btn.solid{background:var(--fg);color:var(--bg)}
+#canvas{position:fixed;left:0;right:0;bottom:0;overflow:hidden;touch-action:none;background:var(--bg)}
+#world{position:absolute;left:0;top:0;transform-origin:0 0}
+#world img{position:absolute;display:block;border-radius:3px;background:var(--line)}
+#world .lbl{position:absolute;font-size:30px;color:var(--fg);white-space:nowrap}
 #toast{position:fixed;left:50%;bottom:calc(env(safe-area-inset-bottom) + 24px);transform:translateX(-50%);background:var(--fg);color:var(--bg);padding:8px 14px;border-radius:16px;font-size:14px;z-index:20}
 #install{margin:0 12px 10px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;font-size:13px;display:flex;gap:10px;align-items:center}
 #install span{flex:1;color:var(--mut)}
@@ -63,12 +83,19 @@ header{position:sticky;top:0;z-index:2;background:var(--bg);padding:calc(env(saf
 <header>
   <div id="title">Moodboard</div>
   <div id="count"></div>
+  <button id="viewBtn" style="font-size:14px;padding:6px 10px;border:1px solid var(--line);border-radius:14px">Canvas</button>
   <button id="shuffleBtn" style="font-size:14px;padding:6px 10px;border:1px solid var(--line);border-radius:14px">Shuffle</button>
   <button id="more" aria-label="Board options">&#8943;</button>
 </header>
 <div id="install" hidden><span>Install it so it shows up in the share menu.</span><button id="installBtn" hidden>Install</button></div>
 <div id="link" hidden style="color:var(--mut);font-size:12px;padding:0 12px 8px"></div>
 <nav class="strip" id="strip"></nav>
+<div id="words">
+  <input id="wordIn" placeholder="Add a word to this board" autocomplete="off" autocapitalize="off" enterkeyhint="done">
+  <div id="sugg"></div>
+  <div id="bwords"></div>
+</div>
+<div id="canvas" hidden><div id="world"></div></div>
 <main id="grid"></main>
 <div class="empty" id="empty" hidden>Empty board.<br><br>Firefox: double tap images on Google Images.<br>Chrome: open an image, long-press it, <b>Share image</b>, <b>Moodboard</b>.</div>
 
@@ -113,6 +140,15 @@ header{position:sticky;top:0;z-index:2;background:var(--bg);padding:calc(env(saf
   <div id="dipInfo" hidden><span class="grow" id="dipBoard"></span><button id="dipSource" style="color:#fff">Source</button><button id="dipClose" style="color:#fff">Close</button></div>
 </div>
 
+<!-- Google results for one word: tap to pick, then add -->
+<div class="layer" id="results" hidden>
+  <div class="panel">
+    <div class="label" style="padding-bottom:10px"><span id="resTitle"></span><button id="resAll">Select all</button></div>
+    <div id="resGrid"></div>
+    <div class="resbar"><span class="grow" id="resCount">Tap images to pick</span><button class="btn" id="resClose">Close</button><button class="btn solid" id="resAdd">Add</button></div>
+  </div>
+</div>
+
 <div id="toast" hidden></div>
 
 <script>
@@ -135,9 +171,15 @@ function src(it) {
   return it.url;
 }
 function freeUrls() { objUrls.forEach(URL.revokeObjectURL); objUrls = []; }
+// Small preview for grids and the canvas; full image only in the viewers.
+function thumbSrc(it) {
+  var b = it.thumb || it.blob;
+  if (b) { var u = URL.createObjectURL(b); objUrls.push(u); return u; }
+  return it.url;
+}
 function img(it) {
   var i = document.createElement('img');
-  i.src = src(it); i.loading = 'lazy'; i.referrerPolicy = 'no-referrer'; i.alt = '';
+  i.src = thumbSrc(it); i.loading = 'lazy'; i.referrerPolicy = 'no-referrer'; i.alt = '';
   return i;
 }
 function toast(msg) {
@@ -183,7 +225,10 @@ async function render() {
     i.onclick = function () { openViewer(it); };
     grid.appendChild(i);
   });
-  $('#empty').hidden = items.length > 0;
+  $('#empty').hidden = items.length > 0 || canvasOn;
+  drawWords(board);
+  if (canvasOn) drawCanvas(items);
+  makeThumbs(items);
   drawCtx();
   hello();
 }
@@ -344,6 +389,8 @@ addEventListener('message', async function (e) {
     setLink('Google link on' + (m.waiting ? ' · ' + m.waiting + ' waiting' : ''));
     hello();
   }
+  if (m.type === 'results' && m.res && (!res || res.id !== m.res.id)) openResults(m.res);
+  if (m.type === 'progress') toast('Adding ' + m.done + '/' + m.total);
   if (m.type === 'debug') {
     try { await navigator.clipboard.writeText(m.text); toast('Debug log copied'); }
     catch (err) { prompt('Copy this', m.text); }
@@ -363,7 +410,7 @@ addEventListener('message', async function (e) {
         var q = m.items[j];
         var blob = q.data ? await (await fetch(q.data)).blob() : null;
         var board = (await MB.get('boards', q.board)) ? q.board : fallback;
-        await MB.put('items', { id: q.id, board: board, blob: blob || undefined, url: blob ? undefined : q.url, src: q.src, t: q.t });
+        await MB.put('items', { id: q.id, board: board, blob: blob || undefined, url: blob ? undefined : q.url, src: q.src, word: q.word || undefined, t: q.t });
         await MB.touch(board);
         ids.push(q.id);
       }
@@ -459,7 +506,7 @@ function dipDraw() {
     if (!keep[id]) { if (dip.urls[id].indexOf('blob:') === 0) URL.revokeObjectURL(dip.urls[id]); delete dip.urls[id]; }
   });
   var cur = dipItem(0);
-  $('#dipBoard').textContent = (dip.names[cur.board] || '') + '  ' + (((dip.i % dip.list.length) + dip.list.length) % dip.list.length + 1) + '/' + dip.list.length;
+  $('#dipBoard').textContent = (dip.names[cur.board] || '') + (cur.word ? ' · ' + cur.word : '') + '  ' + (((dip.i % dip.list.length) + dip.list.length) % dip.list.length + 1) + '/' + dip.list.length;
   $('#dipSource').hidden = !cur.src;
   document.querySelectorAll('#dipScope .chip').forEach(function (c) { c.classList.toggle('on', c.dataset.s === dip.scope); });
 }
@@ -469,6 +516,14 @@ async function openDip(scope) {
   if (!items.length) { toast(dip.scope === 'board' ? 'This board is empty' : 'No images yet'); if (dip.scope === 'board') return openDip('all'); return; }
   dip.names = {}; (await MB.boards()).forEach(function (b) { dip.names[b.id] = b.name; });
   dip.list = shuffle(items); dip.i = 0;
+  if ($('#dip').hidden) { $('#dip').hidden = false; history.pushState({ dip: 1 }, ''); }
+  $('#dipInfo').hidden = $('#dipScope').hidden = true;
+  dipDraw();
+}
+async function openDipList(list, start) {
+  if (!list.length) return;
+  dip.names = {}; (await MB.boards()).forEach(function (b) { dip.names[b.id] = b.name; });
+  dip.list = list; dip.i = Math.max(0, start);
   if ($('#dip').hidden) { $('#dip').hidden = false; history.pushState({ dip: 1 }, ''); }
   $('#dipInfo').hidden = $('#dipScope').hidden = true;
   dipDraw();
@@ -522,6 +577,212 @@ function dipStep(dir) {
     } else { track.classList.add('anim'); track.style.transform = ''; }
   }
   el.addEventListener('pointerup', up); el.addEventListener('pointercancel', up);
+})();
+
+// ---------- Small previews (made once per image, stored with it) ----------
+var thumbing = false;
+async function makeThumbs(items) {
+  if (thumbing) return; thumbing = true;
+  var made = 0;
+  try {
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i];
+      if (it.thumb || !it.blob) continue;
+      try {
+        var bmp = await createImageBitmap(it.blob);
+        var k = Math.min(1, 480 / Math.max(bmp.width, bmp.height));
+        var c = document.createElement('canvas');
+        c.width = Math.max(1, Math.round(bmp.width * k)); c.height = Math.max(1, Math.round(bmp.height * k));
+        c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+        it.thumb = await new Promise(function (r) { c.toBlob(r, 'image/jpeg', 0.82); });
+        it.w = bmp.width; it.h = bmp.height;
+        await MB.put('items', it); made++;
+      } catch (e) {}
+    }
+  } finally { thumbing = false; }
+  if (made && canvasOn) render();
+}
+
+// ---------- Theme words + live suggestions (Datamuse) ----------
+var suggTimer = null, suggCtl = null;
+function googleUrl(word) { return (window.__mbGoogle || 'https://www.google.com/search') + '?udm=2&q=' + encodeURIComponent(word); }
+async function addWord(w) {
+  w = w.trim().toLowerCase(); if (!w) return;
+  var b = await MB.get('boards', current);
+  b.words = b.words || [];
+  if (b.words.indexOf(w) < 0) { b.words.push(w); await MB.put('boards', b); }
+  $('#wordIn').value = ''; $('#sugg').innerHTML = '';
+  render();
+}
+function drawWords(board) {
+  var box = $('#bwords'); box.innerHTML = '';
+  ((board && board.words) || []).forEach(function (w) {
+    box.appendChild(chip(w, 'word', function () { grab(w); }, async function () {
+      if (!confirm('Remove "' + w + '" from this board? Its images stay.')) return;
+      var b = await MB.get('boards', current); b.words = (b.words || []).filter(function (x) { return x !== w; });
+      await MB.put('boards', b); render();
+    }));
+  });
+  suggest();
+}
+async function suggest() {
+  clearTimeout(suggTimer);
+  suggTimer = setTimeout(async function () {
+    var typed = $('#wordIn').value.trim();
+    var b = await MB.get('boards', current);
+    var have = (b && b.words) || [];
+    var basis = typed || have.slice(-3).join(' ');
+    var box = $('#sugg');
+    if (!basis) { box.innerHTML = ''; return; }
+    if (suggCtl) suggCtl.abort();
+    suggCtl = new AbortController();
+    try {
+      var r = await fetch('https://api.datamuse.com/words?max=24&ml=' + encodeURIComponent(basis), { signal: suggCtl.signal });
+      var list = (await r.json()).map(function (x) { return x.word; })
+        .filter(function (w) { return have.indexOf(w) < 0 && w !== typed.toLowerCase(); }).slice(0, typed ? 12 : 10);
+      box.innerHTML = '';
+      if (typed) box.appendChild(chip('+ ' + typed, 'sug', function () { addWord(typed); }));
+      list.forEach(function (w) { box.appendChild(chip(w, 'sug', function () { addWord(w); })); });
+    } catch (e) { if (e.name !== 'AbortError') box.innerHTML = ''; }
+  }, 180);
+}
+$('#wordIn').addEventListener('input', suggest);
+$('#wordIn').addEventListener('keydown', function (e) { if (e.key === 'Enter') addWord(this.value); });
+
+// Tap a word: open Google Images for it. With the Firefox script running, the results come back here to pick from.
+function grab(word) {
+  if (linked) bridgeSend({ type: 'grab', word: word, board: current });
+  window.open(googleUrl(word), '_blank');
+  toast(linked ? 'Grabbing "' + word + '"…' : 'Opened Google. Double tap to save.');
+}
+
+// ---------- Results picker ----------
+var res = null, picked = {};
+function openResults(r) {
+  res = r; picked = {};
+  $('#resTitle').textContent = r.word + ' · ' + r.items.length + ' results';
+  var g = $('#resGrid'); g.innerHTML = '';
+  r.items.forEach(function (it, i) {
+    var d = document.createElement('div');
+    var im = document.createElement('img'); im.src = it.thumb; im.referrerPolicy = 'no-referrer'; im.loading = 'lazy'; im.alt = it.title || '';
+    d.appendChild(im);
+    d.onclick = function () { picked[i] = !picked[i]; d.classList.toggle('sel', !!picked[i]); countPicked(); };
+    g.appendChild(d);
+  });
+  countPicked();
+  $('#results').hidden = false;
+}
+function countPicked() {
+  var n = Object.keys(picked).filter(function (k) { return picked[k]; }).length;
+  $('#resCount').textContent = n ? n + ' picked' : 'Tap images to pick';
+  $('#resAdd').textContent = n ? 'Add ' + n : 'Add';
+}
+function closeResults() { if (res) bridgeSend({ type: 'resultsSeen', id: res.id }); res = null; $('#results').hidden = true; }
+$('#resClose').onclick = closeResults;
+$('#resAll').onclick = function () {
+  var all = res && res.items.every(function (x, i) { return picked[i]; });
+  document.querySelectorAll('#resGrid div').forEach(function (d, i) { picked[i] = !all; d.classList.toggle('sel', !all); });
+  countPicked();
+};
+$('#resAdd').onclick = function () {
+  if (!res) return;
+  var list = res.items.filter(function (x, i) { return picked[i]; })
+    .map(function (x) { return { url: x.url, thumb: x.thumb, src: x.lpage || x.url, word: res.word, board: res.board }; });
+  if (!list.length) { toast('Pick some first'); return; }
+  bridgeSend({ type: 'fetchPicked', items: list });
+  toast('Adding ' + list.length + '…');
+  closeResults();
+};
+
+// ---------- Canvas: every image of the board, grouped by word; pinch to zoom, drag to pan ----------
+var canvasOn = false, cam = { x: 0, y: 0, s: 1 }, camFitted = false, canvasItems = [];
+$('#viewBtn').onclick = function () {
+  canvasOn = !canvasOn; camFitted = false;
+  $('#viewBtn').textContent = canvasOn ? 'Grid' : 'Canvas';
+  $('#canvas').hidden = !canvasOn; $('#grid').hidden = canvasOn; $('#words').hidden = canvasOn;
+  render();
+};
+function applyCam() { $('#world').style.transform = 'translate(' + cam.x + 'px,' + cam.y + 'px) scale(' + cam.s + ')'; }
+function drawCanvas(items) {
+  var cv = $('#canvas');
+  cv.style.top = Math.round($('#strip').getBoundingClientRect().bottom + scrollY) + 'px';
+  canvasItems = items;
+  var groups = {}, order = [];
+  items.slice().reverse().forEach(function (it) {
+    var w = it.word || 'other';
+    if (!groups[w]) { groups[w] = []; order.push(w); }
+    groups[w].push(it);
+  });
+  var COL = 160, GAP = 6, COLS = 3, CW = COLS * COL + (COLS - 1) * GAP, PAD = 90, PER_ROW = 2;
+  var world = $('#world'); world.innerHTML = '';
+  var x = 0, y = 0, rowH = 0, maxX = 0;
+  order.forEach(function (w, gi) {
+    if (gi && gi % PER_ROW === 0) { x = 0; y += rowH + PAD; rowH = 0; }
+    var lbl = document.createElement('div'); lbl.className = 'lbl'; lbl.textContent = w;
+    lbl.style.left = x + 'px'; lbl.style.top = y + 'px'; world.appendChild(lbl);
+    var colsH = [0, 0, 0], top = y + 46;
+    groups[w].forEach(function (it) {
+      var c = colsH.indexOf(Math.min.apply(null, colsH));
+      var h = it.w && it.h ? COL * it.h / it.w : COL;
+      var im = img(it); im.loading = 'eager';
+      im.style.left = (x + c * (COL + GAP)) + 'px'; im.style.top = (top + colsH[c]) + 'px';
+      im.style.width = COL + 'px'; im.style.height = h + 'px';
+      im.dataset.id = it.id; im.dataset.word = w;
+      world.appendChild(im);
+      colsH[c] += h + GAP;
+    });
+    rowH = Math.max(rowH, 46 + Math.max.apply(null, colsH));
+    x += CW + PAD; maxX = Math.max(maxX, x - PAD);
+  });
+  if (!camFitted) {
+    var vw = cv.clientWidth || innerWidth;
+    cam.s = Math.min(1, (vw - 24) / Math.max(1, maxX)); cam.x = 12; cam.y = 12; camFitted = true;
+  }
+  applyCam();
+  if (!items.length) world.innerHTML = '<div class="lbl" style="font-size:18px;color:var(--mut);left:0;top:0">Add words, tap one, pick images.</div>';
+}
+(function () {
+  var cv = $('#canvas'), pts = {}, last = null, moved = 0, downAt = null;
+  function mid() { var p = Object.values(pts); return { x: (p[0].x + p[1].x) / 2, y: (p[0].y + p[1].y) / 2, d: Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y) }; }
+  function zoomAt(px, py, k) {
+    var ns = Math.max(0.05, Math.min(4, cam.s * k)); k = ns / cam.s;
+    cam.x = px - (px - cam.x) * k; cam.y = py - (py - cam.y) * k; cam.s = ns; applyCam();
+  }
+  cv.addEventListener('pointerdown', function (e) {
+    cv.setPointerCapture(e.pointerId);
+    var r = cv.getBoundingClientRect();
+    pts[e.pointerId] = { x: e.clientX - r.left, y: e.clientY - r.top };
+    if (Object.keys(pts).length === 1) { moved = 0; downAt = { x: e.clientX, y: e.clientY, t: e.target }; }
+    last = Object.keys(pts).length === 2 ? mid() : null;
+  });
+  cv.addEventListener('pointermove', function (e) {
+    if (!pts[e.pointerId]) return;
+    var r = cv.getBoundingClientRect(), p = pts[e.pointerId];
+    var nx = e.clientX - r.left, ny = e.clientY - r.top;
+    var n = Object.keys(pts).length;
+    if (n === 1) { cam.x += nx - p.x; cam.y += ny - p.y; applyCam(); }
+    moved += Math.abs(nx - p.x) + Math.abs(ny - p.y);
+    p.x = nx; p.y = ny;
+    if (n === 2) {
+      var m = mid();
+      if (last) { cam.x += m.x - last.x; cam.y += m.y - last.y; zoomAt(m.x, m.y, m.d / Math.max(1, last.d)); }
+      last = m;
+    }
+  });
+  function up(e) {
+    var wasTap = Object.keys(pts).length === 1 && moved < 10 && downAt;
+    delete pts[e.pointerId]; last = Object.keys(pts).length === 2 ? mid() : null;
+    if (wasTap && downAt.t.tagName === 'IMG' && downAt.t.dataset.id) {
+      var id = downAt.t.dataset.id, w = downAt.t.dataset.word;
+      var list = canvasItems.filter(function (it) { return (it.word || 'other') === w; }).reverse();
+      openDipList(list, list.findIndex(function (it) { return it.id === id; }));
+    }
+  }
+  cv.addEventListener('pointerup', up); cv.addEventListener('pointercancel', up);
+  cv.addEventListener('wheel', function (e) {
+    e.preventDefault(); var r = cv.getBoundingClientRect();
+    zoomAt(e.clientX - r.left, e.clientY - r.top, Math.exp(-e.deltaY * 0.0015));
+  }, { passive: false });
 })();
 
 // Where this page is running, so storage mix-ups are visible.

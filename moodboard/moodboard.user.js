@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Moodboard: double tap to save
 // @namespace    symbioze.moodboard
-// @version      1.1.0
+// @version      1.2.0
 // @description  Double tap an image on Google Images to save it to your Moodboard.
 // @match        https://pogaldock.github.io/Voxrot/moodboard/*
 // @include      /^https:\/\/(www|images)\.google\.[a-z.]+\/.*/
@@ -31,6 +31,22 @@
   function get(k, d) { var v = GM_getValue(k); return v === undefined ? d : v; }
   function set(k, v) { GM_setValue(k, v); }
   function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
+
+    function fetchBlob(url) {
+    return new Promise(function (res) {
+      if (/^data:image\//.test(url)) { res(url); return; }
+      GM_xmlhttpRequest({
+        method: 'GET', url: url, responseType: 'blob', timeout: 10000,
+        onload: function (r) {
+          var b = r.response;
+          if (r.status >= 200 && r.status < 300 && b && b.size > 500 && /^image\//.test(b.type || '')) {
+            var fr = new FileReader(); fr.onload = function () { res(fr.result); }; fr.onerror = function () { res(null); }; fr.readAsDataURL(b);
+          } else res(null);
+        },
+        onerror: function () { res(null); }, ontimeout: function () { res(null); }
+      });
+    });
+  }
 
   if (/\/moodboard\//.test(location.pathname)) bridge();
   else if (/(^|\.)google\.[a-z.]+$/.test(HOST)) google();
@@ -73,16 +89,38 @@
       }
 
       if (m.type === 'debug?') send({ type: 'debug', text: JSON.stringify(get('debug', []), null, 1) });
+
+      // Page asked for Google results for a word; the Google tab it opens picks this up.
+      if (m.type === 'grab') set('grabReq', { id: uid(), word: m.word, board: m.board, t: Date.now() });
+
+      if (m.type === 'resultsSeen') { var r = get('grabRes', null); if (r && r.id === m.id) set('grabRes', null); }
+
+      // Picked results: download the full images (falls back to the preview) and queue them for import.
+      if (m.type === 'fetchPicked') {
+        (async function () {
+          for (var i = 0; i < m.items.length; i++) {
+            var p = m.items[i];
+            var data = (p.url && await fetchBlob(p.url)) || await fetchBlob(p.thumb);
+            set('queue', get('queue', []).concat([{ id: uid(), board: p.board, word: p.word, data: data, url: data ? null : (p.url || p.thumb), src: p.src, t: Date.now() }]));
+            send({ type: 'progress', done: i + 1, total: m.items.length });
+          }
+          send({ type: 'ready' });
+        })();
+      }
     });
+
+    function sendResults() { var r = get('grabRes', null); if (r && r.items && r.items.length) send({ type: 'results', res: r }); }
 
     // A save on Google while this tab is open: ask the page for its state, which triggers the import.
     if (typeof GM_addValueChangeListener === 'function') {
       GM_addValueChangeListener('queue', function (name, oldV, newV, remote) {
         if (remote && newV && newV.length) send({ type: 'ready', waiting: newV.length });
       });
+      GM_addValueChangeListener('grabRes', function (name, oldV, newV, remote) { if (remote) sendResults(); });
     }
 
     send({ type: 'ready', waiting: get('queue', []).length });
+    sendResults();
   }
 
   // ================= Google side =================
@@ -306,22 +344,6 @@
       return null;
     }
 
-    function fetchBlob(url) {
-      return new Promise(function (res) {
-        if (/^data:image\//.test(url)) { res(url); return; }
-        GM_xmlhttpRequest({
-          method: 'GET', url: url, responseType: 'blob', timeout: 10000,
-          onload: function (r) {
-            var b = r.response;
-            if (r.status >= 200 && r.status < 300 && b && b.size > 500 && /^image\//.test(b.type || '')) {
-              var fr = new FileReader(); fr.onload = function () { res(fr.result); }; fr.onerror = function () { res(null); }; fr.readAsDataURL(b);
-            } else res(null);
-          },
-          onerror: function () { res(null); }, ontimeout: function () { res(null); }
-        });
-      });
-    }
-
     function attrsOf(el) {
       var o = [];
       for (var d = 0; el && d < 8; d++, el = el.parentElement) {
@@ -331,6 +353,48 @@
       }
       return o;
     }
+
+    // ---------- grab mode: Moodboard opened this tab to collect results for one word ----------
+    function grabMode() {
+      var req = get('grabReq', null);
+      if (!req || Date.now() - req.t > 120000) return;
+      var q = (new URLSearchParams(location.search).get('q') || '').trim().toLowerCase();
+      if (q !== String(req.word).trim().toLowerCase()) return;
+      set('grabReq', null);
+      drawPill('grabbing "' + req.word + '"');
+      var tries = 0, lastN = -1;
+      var timer = setInterval(function () {
+        tries++;
+        var tiles = document.querySelectorAll('[data-docid][data-lpage]');
+        var n = tiles.length;
+        if ((n >= 10 && n === lastN) || tries > 16) { clearInterval(timer); collect(req, tiles); }
+        lastN = n;
+      }, 500);
+    }
+    function collect(req, tiles) {
+      var text = scriptText(), out = [], seen = {};
+      for (var i = 0; i < tiles.length && out.length < 60; i++) {
+        var t = tiles[i], im = t.querySelector('img');
+        if (!im) continue;
+        var thumb = im.currentSrc || im.src || '';
+        if (!/^(https?:|data:image)/.test(thumb) || /^data:image\/gif/.test(thumb)) thumb = im.getAttribute('data-jslayout-progressive-load') || thumb;
+        var url = null;
+        ['data-docid', 'data-ref-docid'].forEach(function (a) {
+          var v = t.getAttribute(a); if (url || !v) return;
+          var idx = text.indexOf('"' + v + '"'); if (idx >= 0) url = originalAfter(text, idx);
+        });
+        var key = url || thumb;
+        if (!thumb || seen[key]) continue; seen[key] = 1;
+        out.push({ thumb: thumb, url: url, lpage: t.getAttribute('data-lpage'), title: im.alt || '' });
+      }
+      set('grabRes', { id: uid(), word: req.word, board: req.board, items: out, t: Date.now() });
+      var log = get('debug', []);
+      log.unshift({ t: new Date().toISOString(), how: 'grab', word: req.word, tiles: tiles.length, sent: out.length, full: out.filter(function (x) { return x.url; }).length });
+      set('debug', log.slice(0, 8));
+      drawPill(out.length + ' sent to Moodboard');
+      setTimeout(function () { try { window.close(); } catch (e) {} }, 700);
+    }
+    setTimeout(grabMode, 300);
 
     async function save(img) {
       var rect = img.getBoundingClientRect();
@@ -347,7 +411,8 @@
       if (!data) { data = await fetchBlob(thumb); small = true; }
 
       var board = active();
-      var item = { id: uid(), board: board, data: data, url: data ? null : (found ? found.url : thumb), src: sourcePage(img) || (found && found.url) || null, t: Date.now() };
+      var q = (new URLSearchParams(location.search).get('q') || '').trim().toLowerCase();
+      var item = { id: uid(), board: board, word: q || undefined, data: data, url: data ? null : (found ? found.url : thumb), src: sourcePage(img) || (found && found.url) || null, t: Date.now() };
       set('queue', get('queue', []).concat([item]));
       saved[key] = 1; set('saved', saved);
       sessionCount++;
