@@ -651,22 +651,34 @@ $('#wordIn').addEventListener('keydown', function (e) { if (e.key === 'Enter') a
 var boardItems = [];
 function lensSearch(it) {
   if (!it) { toast('No images on this board yet'); return; }
+  var src = it.blob || it.thumb;
+  if (!src && !it.url) { toast('This image has no file to search with'); return; }
+  // Open the tab now, inside the tap; fill it once the image is re-encoded.
+  var name = 'mblens' + Date.now();
+  var win = window.open('about:blank', name);
   if (linked) bridgeSend({ type: 'lens', board: current });
-  var blob = it.blob && it.blob.size < 8e6 ? it.blob : (it.thumb || it.blob);
-  if (!blob) {
-    if (it.url) window.open('https://lens.google.com/uploadbyurl?url=' + encodeURIComponent(it.url), '_blank');
-    else toast('This image has no file to search with');
-    return;
-  }
-  var f = document.createElement('form');
-  f.method = 'POST'; f.enctype = 'multipart/form-data'; f.target = '_blank'; f.hidden = true;
-  f.action = (window.__mbLens || 'https://lens.google.com/v3/upload') + '?ep=ccm&s=&st=' + Date.now();
-  var inp = document.createElement('input'); inp.type = 'file'; inp.name = 'encoded_image';
-  var dt = new DataTransfer();
-  dt.items.add(new File([blob], 'image.jpg', { type: blob.type || 'image/jpeg' }));
-  inp.files = dt.files;
-  f.appendChild(inp); document.body.appendChild(f); f.submit(); f.remove();
-  toast(linked ? 'Similar images: double tap to save' : 'Opened Google Lens');
+  if (!src) { if (win) win.location = 'https://lens.google.com/uploadbyurl?url=' + encodeURIComponent(it.url); return; }
+  lensJpeg(src).then(function (j) {
+    // Same request Firefox's own Lens button sends: phone-friendly entry point, JPEG <= 1000px, matching dimensions.
+    var f = document.createElement('form');
+    f.method = 'POST'; f.enctype = 'multipart/form-data'; f.target = name; f.hidden = true;
+    f.action = (window.__mbLens || 'https://lens.google.com/upload') + '?ep=fntpubb&st=' + Date.now() +
+      '&vpw=' + innerWidth + '&vph=' + innerHeight + '&hl=' + encodeURIComponent((navigator.language || 'en').split('-')[0]);
+    var inp = document.createElement('input'); inp.type = 'file'; inp.name = 'encoded_image';
+    var dt = new DataTransfer(); dt.items.add(new File([j.blob], 'image.jpg', { type: 'image/jpeg' })); inp.files = dt.files;
+    var dim = document.createElement('input'); dim.type = 'hidden'; dim.name = 'processed_image_dimensions'; dim.value = j.w + ',' + j.h;
+    f.appendChild(inp); f.appendChild(dim); document.body.appendChild(f); f.submit(); f.remove();
+    toast(linked ? 'Similar images: double tap to save' : 'Opened Google Lens');
+  }).catch(function () { if (win) win.close(); toast('Could not read this image'); });
+}
+async function lensJpeg(blob) {
+  var bmp = await createImageBitmap(blob);
+  var k = Math.min(1, 1000 / Math.max(bmp.width, bmp.height));
+  var c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(bmp.width * k)); c.height = Math.max(1, Math.round(bmp.height * k));
+  c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+  var out = await new Promise(function (r) { c.toBlob(r, 'image/jpeg', 0.4); });
+  return { blob: out, w: c.width, h: c.height };
 }
 $('#similarBtn').onclick = function () { lensSearch(boardItems[Math.floor(Math.random() * boardItems.length)]); };
 $('#vSimilar').onclick = function () { lensSearch(viewing); };

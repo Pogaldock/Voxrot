@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Moodboard: double tap to save
 // @namespace    symbioze.moodboard
-// @version      1.4.0
+// @version      1.4.1
 // @description  Double tap an image on Google Images to save it to your Moodboard.
 // @match        https://pogaldock.github.io/Voxrot/moodboard/*
 // @include      /^https:\/\/(www|images)\.google\.[a-z.]+\/.*/
@@ -144,7 +144,7 @@
 
   // ================= Google side =================
   function google() {
-    function isLens() { return /[?&]vsrid=/.test(location.search); }
+    function isLens() { return /[?&](vsrid|lns_mode|lns_surface)=/.test(location.search) || /[?&]udm=(44|48)(&|$)/.test(location.search); }
     function isImages() {
       return /[?&](udm=2|tbm=isch)(&|$)/.test(location.search) || isLens() || /^images\./.test(HOST) || window.__mbHost;
     }
